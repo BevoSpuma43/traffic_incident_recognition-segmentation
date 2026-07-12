@@ -1,0 +1,334 @@
+"""
+src/tracker_state.py
+====================
+Gestione dello store dei track attivi per il progetto traffic-accident-seg.
+
+Questo modulo mantiene un dizionario aggiornato degli stati dinamici di tutti
+i veicoli attualmente tracciati. Ad ogni frame:
+  1. aggiorna i track già noti con le nuove detection (cinematica + maschera)
+  2. crea nuovi stati per i track appena apparsi
+  3. rimuove i track "stale" (non rilevati per troppi frame consecutivi)
+
+Dipendenze interne (bottom-up):
+  src.config   → AppConfig (parametri di soglia)
+  src.models   → Point2D, DetectionResult, VehicleState
+  src.geometry → compute_centroid_from_polygon
+  src.kinematics → compute_speed_px, compute_acceleration, update_stopped_counter
+"""
+
+from __future__ import annotations
+
+from src.config import AppConfig
+from src.geometry import compute_centroid_from_polygon
+from src.kinematics import compute_acceleration, compute_speed_px, update_stopped_counter
+from src.models import DetectionResult, Point2D, VehicleState
+
+
+class VehicleStateStore:
+    """
+    Store aggiornabile degli stati cinematici dei veicoli tracciati.
+
+    Mantiene internamente un dizionario ``{track_id: VehicleState}`` e
+    fornisce metodi per aggiornarlo ad ogni frame, rimuovere i track morti
+    e leggere l'elenco degli stati attivi.
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        """
+        Inizializza lo store con la configurazione dell'applicazione.
+
+        Parameters
+        ----------
+        config : AppConfig | None
+            Configurazione dell'applicazione. Se None vengono usati i
+            valori di default definiti direttamente in AppConfig.
+        """
+        self._config = config
+
+        # Dizionario principale: track_id → stato cinematico corrente.
+        self._states: dict[int, VehicleState] = {}
+
+        # Soglia di pulizia: dopo quanti frame di assenza rimuovere un track.
+        self._max_missing_frames: int = int(
+            getattr(config, "max_missing_frames", 10)
+        )
+
+    # ------------------------------------------------------------------
+    # Interfaccia pubblica
+    # ------------------------------------------------------------------
+
+    def update(
+        self,
+        detections: list[DetectionResult],
+        frame_index: int,
+        stopped_speed_threshold: float | None = None,
+    ) -> list[VehicleState]:
+        """
+        Aggiorna lo store con le detection del frame corrente.
+
+        Per ogni detection con track_id valido:
+          - se il track esiste già → aggiorna cinematica e maschera
+          - se è nuovo → crea un nuovo VehicleState con valori iniziali
+
+        Parameters
+        ----------
+        detections : list[DetectionResult]
+            Output di VehicleSegmenter.segment_and_track() per il frame corrente.
+        frame_index : int
+            Indice progressivo del frame (usato per gestire i track stale).
+        stopped_speed_threshold : float | None
+            Soglia di velocità (pixel/frame) al di sotto della quale un
+            veicolo è considerato fermo. Se None viene letto da AppConfig.
+
+        Returns
+        -------
+        list[VehicleState]
+            Lista degli stati aggiornati in questo frame (solo i track
+            presenti nelle detection correnti, non tutti quelli in store).
+        """
+        # Lettura della soglia dalla configurazione se non passata esplicitamente.
+        if stopped_speed_threshold is None:
+            stopped_speed_threshold = float(
+                getattr(self._config, "stopped_speed_threshold", 2.5)
+            )
+
+        updated_states: list[VehicleState] = []
+
+        for detection in detections:
+            # I track senza ID assegnato da ByteTrack (es. primo frame
+            # o detection momentaneamente non associate) vengono scartati.
+            track_id = detection.track_id
+            if track_id is None:
+                continue
+
+            # Calcola il centroide del veicolo come Point2D.
+            # Tenta prima dai momenti del poligono, poi dalla bbox come fallback.
+            centroid: Point2D = self._compute_detection_centroid(detection)
+
+            if track_id in self._states:
+                # --- Aggiornamento di un track già noto ---
+                self._update_existing_state(
+                    track_id=track_id,
+                    detection=detection,
+                    centroid=centroid,
+                    frame_index=frame_index,
+                    stopped_speed_threshold=stopped_speed_threshold,
+                )
+                updated_states.append(self._states[track_id])
+            else:
+                # --- Creazione di un nuovo track ---
+                new_state = self._build_new_state(
+                    detection=detection,
+                    centroid=centroid,
+                    frame_index=frame_index,
+                    stopped_speed_threshold=stopped_speed_threshold,
+                )
+                self._states[track_id] = new_state
+                updated_states.append(new_state)
+
+        return updated_states
+
+    def get_active_states(self) -> list[VehicleState]:
+        """
+        Restituisce tutti gli stati correnti nello store.
+
+        Returns
+        -------
+        list[VehicleState]
+            Snapshot della lista degli stati attivi. Non include i track
+            rimossi da remove_stale_tracks().
+        """
+        return list(self._states.values())
+
+    def remove_stale_tracks(self, frame_index: int) -> None:
+        """
+        Rimuove dallo store i track non rilevati per troppi frame consecutivi.
+
+        Un track è considerato "stale" se non compare nelle detection da
+        più di ``max_missing_frames`` frame. Questo evita l'accumulo di
+        stati per veicoli che hanno lasciato il campo visivo.
+
+        Parameters
+        ----------
+        frame_index : int
+            Indice del frame corrente, confrontato con ``last_seen_frame``
+            di ogni stato per calcolare i frame di assenza.
+        """
+        # Raccoglie gli ID da eliminare in una lista separata per evitare
+        # la modifica del dizionario durante l'iterazione.
+        stale_ids: list[int] = [
+            track_id
+            for track_id, state in self._states.items()
+            if frame_index - state.last_seen_frame > self._max_missing_frames
+        ]
+
+        for track_id in stale_ids:
+            del self._states[track_id]
+
+    # ------------------------------------------------------------------
+    # Metodi privati
+    # ------------------------------------------------------------------
+
+    def _update_existing_state(
+        self,
+        track_id: int,
+        detection: DetectionResult,
+        centroid: Point2D,
+        frame_index: int,
+        stopped_speed_threshold: float,
+    ) -> None:
+        """
+        Aggiorna in-place lo stato di un track già presente nello store.
+
+        Calcola la nuova velocità come distanza euclidea tra il centroide
+        precedente e quello corrente, l'accelerazione come differenza di
+        velocità, e aggiorna il contatore di stop.
+
+        Parameters
+        ----------
+        track_id : int
+            ID del track da aggiornare.
+        detection : DetectionResult
+            Detection corrente per questo track.
+        centroid : Point2D
+            Centroide calcolato per il frame corrente.
+        frame_index : int
+            Indice del frame corrente.
+        stopped_speed_threshold : float
+            Soglia di velocità per il contatore di stop.
+        """
+        state = self._states[track_id]
+
+        # Salva i valori del frame precedente prima di sovrascriverli.
+        previous_centroid: Point2D | None = state.centroid
+        previous_speed_px: float = state.speed_px
+
+        # Calcola la velocità euclidea tra centroide precedente e corrente.
+        # La firma è (prev_centroid, curr_centroid) come da kinematics.py.
+        speed_px: float = compute_speed_px(previous_centroid, centroid)
+
+        # Accelerazione = differenza di velocità tra frame consecutivi.
+        # Un valore fortemente negativo indica una frenata brusca.
+        acceleration_px: float = compute_acceleration(speed_px, previous_speed_px)
+
+        # Aggiorna il contatore di frame consecutivi in cui il veicolo è fermo.
+        stopped_frames: int = update_stopped_counter(
+            prev_counter=state.stopped_frames,
+            speed_px=speed_px,
+            stopped_speed_threshold=stopped_speed_threshold,
+        )
+
+        # Aggiornamento in-place dei campi dello stato.
+        # VehicleState ha slots=True: setattr funziona solo per campi esistenti.
+        state.prev_centroid = previous_centroid
+        state.centroid = centroid
+        state.prev_speed_px = previous_speed_px
+        state.speed_px = speed_px
+        state.acceleration_px = acceleration_px
+        state.polygon = detection.polygon
+        state.mask = detection.mask
+        state.bbox = detection.bbox
+        state.last_seen_frame = frame_index
+        state.stopped_frames = stopped_frames
+
+    def _build_new_state(
+        self,
+        detection: DetectionResult,
+        centroid: Point2D,
+        frame_index: int,
+        stopped_speed_threshold: float,
+    ) -> VehicleState:
+        """
+        Crea un nuovo VehicleState con valori iniziali per un track appena apparso.
+
+        Al primo frame di un track la velocità e l'accelerazione sono 0.0.
+        Il centroide precedente è inizializzato uguale a quello corrente
+        (nessuno spostamento misurabile al primo frame).
+
+        Parameters
+        ----------
+        detection : DetectionResult
+            Detection dal quale leggere track_id, class_id, class_name,
+            polygon, mask e bbox.
+        centroid : Point2D
+            Centroide calcolato per questo primo frame del track.
+        frame_index : int
+            Indice del frame corrente (usato come last_seen_frame iniziale).
+        stopped_speed_threshold : float
+            Soglia per inizializzare il contatore di stop (al primo frame
+            la velocità è 0, quindi il veicolo parte già come "fermo").
+
+        Returns
+        -------
+        VehicleState
+            Nuovo stato cinematico con tutti i campi popolati.
+        """
+        # Al primo frame la velocità è 0: il veicolo parte dal contatore
+        # stopped_frames = 1 (il primo frame lo conta già come fermo).
+        initial_stopped_frames: int = update_stopped_counter(
+            prev_counter=0,
+            speed_px=0.0,
+            stopped_speed_threshold=stopped_speed_threshold,
+        )
+
+        return VehicleState(
+            track_id=detection.track_id,          # int (già validato non-None)
+            class_id=detection.class_id,
+            class_name=detection.class_name,
+            centroid=centroid,
+            prev_centroid=centroid,                # uguale al corrente: nessuno spostamento misurabile
+            speed_px=0.0,
+            prev_speed_px=0.0,
+            acceleration_px=0.0,
+            polygon=detection.polygon,
+            mask=detection.mask,
+            bbox=detection.bbox,
+            last_seen_frame=frame_index,
+            stopped_frames=initial_stopped_frames,
+        )
+
+    def _compute_detection_centroid(self, detection: DetectionResult) -> Point2D:
+        """
+        Calcola il centroide del veicolo e lo restituisce come Point2D.
+
+        Strategia a due livelli:
+          1. Prova a calcolare il centroide dal poligono di segmentazione
+             tramite i momenti di immagine (più preciso, usa tutta la forma).
+          2. Fallback: calcola il centro della bounding box se il poligono
+             non è disponibile o è degenere.
+          3. Ultimo fallback: origine (0, 0) se nessun dato è disponibile.
+
+        Parameters
+        ----------
+        detection : DetectionResult
+            Detection dalla quale leggere polygon e bbox.
+
+        Returns
+        -------
+        Point2D
+            Centroide come oggetto Point2D con attributi .x e .y (float).
+            Compatibile con il Protocol _HasXY usato da compute_speed_px().
+        """
+        # Calcola il centroide dal poligono via momenti di immagine OpenCV.
+        # compute_centroid_from_polygon() restituisce tuple[int,int] | None,
+        # quindi avvolgiamo il risultato in Point2D per soddisfare _HasXY.
+        centroid_tuple = compute_centroid_from_polygon(detection.polygon)
+
+        if centroid_tuple is not None:
+            cx, cy = centroid_tuple
+            # Conversione esplicita da tuple a Point2D: le tuple non hanno
+            # .x e .y, che sono richiesti dal Protocol _HasXY in kinematics.py.
+            return Point2D(x=float(cx), y=float(cy))
+
+        # Fallback: centro della bounding box (x1+x2)/2, (y1+y2)/2.
+        bbox = detection.bbox
+        if bbox is not None and len(bbox) >= 4:
+            x1, y1, x2, y2 = bbox[:4]
+            return Point2D(
+                x=float(x1 + x2) / 2.0,
+                y=float(y1 + y2) / 2.0,
+            )
+
+        # Ultimo fallback: origine. Non dovrebbe mai accadere in condizioni
+        # normali, ma evita un crash se entrambe polygon e bbox sono None.
+        return Point2D(x=0.0, y=0.0)

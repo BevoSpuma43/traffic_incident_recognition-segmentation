@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Dataset and models
+dataset/
+*.mp4
+*.avi
+*.mkv
+# Uncomment the line below if you don't want to track YOLO weights
+# *.pt
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
