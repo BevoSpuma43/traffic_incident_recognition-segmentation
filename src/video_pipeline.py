@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.calibration import CalibrationRecorder
 from src.collision_logic import CollisionDetector
 from src.config import AppConfig
 from src.detector import VehicleSegmenter
@@ -62,10 +63,25 @@ class TrafficAccidentPipeline:
         # nella versione originale dove veniva ricreato dentro process_frame).
         self.collision_detector: CollisionDetector = CollisionDetector.from_config(config)
 
+        # Gli eventi restano unici per logging, ma l'alert visuale persiste
+        # abbastanza a lungo da essere visibile durante la riproduzione.
+        self._visible_collisions: dict[tuple[int, int], tuple[CollisionEvent, int]] = {}
+        calibration_path = str(getattr(config, "calibration_log_path", "")).strip()
+        self._calibration_recorder: CalibrationRecorder | None = None
+        if calibration_path:
+            self._calibration_recorder = CalibrationRecorder(
+                calibration_path,
+                video_path=config.video_path,
+                config=config,
+            )
+
     def process_frame(
         self,
         frame: np.ndarray,
         frame_index: int,
+        *,
+        render: bool = True,
+        timestamp_s: float | None = None,
     ) -> tuple[np.ndarray, list[CollisionEvent]]:
         """
         Processa un singolo frame video e restituisce il frame annotato.
@@ -118,11 +134,47 @@ class TrafficAccidentPipeline:
             vehicle_states=active_states,
             frame_index=frame_index,
         )
+        if self._calibration_recorder is not None:
+            self._calibration_recorder.record_frame(
+                frame_index,
+                self.collision_detector.last_diagnostics,
+                collisions,
+                timestamp_s=timestamp_s,
+                detection_count=len(detections),
+                active_track_count=len(active_states),
+            )
+
+        display_frames = max(
+            1, int(getattr(self.config, "collision_display_frames", 15))
+        )
+        for event in collisions:
+            pair = (event.track_id_a, event.track_id_b)
+            self._visible_collisions[pair] = (event, frame_index + display_frames)
+        expired_pairs = [
+            pair
+            for pair, (_, expires_at) in self._visible_collisions.items()
+            if frame_index >= expires_at
+        ]
+        for pair in expired_pairs:
+            del self._visible_collisions[pair]
+        visible_collisions = [
+            event for event, _ in self._visible_collisions.values()
+        ]
 
         # --- Step 4: Rendering ---
-        annotated = self._render(frame, active_states, collisions)
+        annotated = (
+            self._render(frame, active_states, visible_collisions)
+            if render
+            else frame
+        )
 
         return annotated, collisions
+
+    def close(self) -> None:
+        """Chiude l'eventuale log di calibrazione."""
+        if self._calibration_recorder is not None:
+            self._calibration_recorder.close()
+            self._calibration_recorder = None
 
     def _render(
         self,

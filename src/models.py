@@ -14,6 +14,7 @@ Nessun import circolare: questo modulo non importa altri moduli interni.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -39,6 +40,20 @@ class Point2D:
     x: float
     # Coordinata verticale (riga), in pixel.
     y: float
+
+
+@dataclass(slots=True)
+class TrackSample:
+    """Campione cinematico osservato per un singolo track."""
+
+    frame_index: int
+    centroid: Point2D
+    motion_anchor: Point2D
+    speed_px: float
+    velocity_x_px: float
+    velocity_y_px: float
+    acceleration_px: float
+    mask_area: int
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +159,17 @@ class VehicleState:
     # veicolo torna in movimento.
     stopped_frames: int
 
+    # Punto inferiore centrale della bbox, meno sensibile del centroide alle
+    # occlusioni parziali della maschera.
+    motion_anchor: Point2D | None = None
+    prev_motion_anchor: Point2D | None = None
+    velocity_x_px: float = 0.0
+    velocity_y_px: float = 0.0
+    kinematics_valid: bool = False
+    observed_frames: int = 1
+    confidence: float = 0.0
+    history: deque[TrackSample] = field(default_factory=deque)
+
 
 # ---------------------------------------------------------------------------
 # Evento di collisione rilevato
@@ -164,9 +190,8 @@ class CollisionEvent:
     track_id_b) per coerenza con la nomenclatura di collision_logic.py e
     renderer.py, che accedono a questi attributi via getattr().
 
-    I campi cinematici (speed_*, acceleration_*) hanno default = 0.0 perché
-    collision_logic.py non li popola esplicitamente: sono riservati a future
-    estensioni di logging/diagnostica.
+    I campi cinematici e spaziali rendono l'evento spiegabile e vengono
+    popolati dal rilevatore al momento della conferma.
     """
 
     # Indice del frame in cui è stata rilevata la collisione.
@@ -200,4 +225,32 @@ class CollisionEvent:
     acceleration_a: float = 0.0
 
     # Accelerazione del veicolo B al momento dell'evento (pixel/frame²).
-    acceleration_b: float = 0.0
+    acceleration_b: float = 0.0
+
+    overlap_ratio: float = 0.0
+    spatial_distance_px: float = 0.0
+    closing_speed_px: float = 0.0
+    confidence: float = 0.0
+    first_contact_frame: int | None = None
+    confirmation_frame: int | None = None
+
+
+@dataclass(slots=True)
+class PairDiagnostic:
+    """Evidenze frame-per-frame usate per calibrare una coppia di track."""
+
+    frame_index: int
+    track_id_a: int
+    track_id_b: int
+    contact: bool
+    overlap_area: int
+    overlap_ratio: float
+    spatial_distance_px: float
+    closing_speed_px: float
+    hard_deceleration: bool
+    dual_stop: bool
+    stop_transition: bool
+    had_recent_motion: bool
+    candidate_frames: int
+    pair_status: str
+    emitted: bool

@@ -18,10 +18,17 @@ Dipendenze interne (bottom-up):
 
 from __future__ import annotations
 
+from collections import deque
+
 from src.config import AppConfig
 from src.geometry import compute_centroid_from_polygon
-from src.kinematics import compute_acceleration, compute_speed_px, update_stopped_counter
-from src.models import DetectionResult, Point2D, VehicleState
+from src.kinematics import (
+    compute_acceleration,
+    compute_velocity_px,
+    exponential_moving_average,
+    update_stopped_counter,
+)
+from src.models import DetectionResult, Point2D, TrackSample, VehicleState
 
 
 class VehicleStateStore:
@@ -51,6 +58,11 @@ class VehicleStateStore:
         # Soglia di pulizia: dopo quanti frame di assenza rimuovere un track.
         self._max_missing_frames: int = int(
             getattr(config, "max_missing_frames", 10)
+        )
+        self._history_size = max(2, int(getattr(config, "motion_history_size", 15)))
+        self._velocity_alpha = float(getattr(config, "velocity_ema_alpha", 0.45))
+        self._max_kinematic_gap = max(
+            1, int(getattr(config, "max_kinematic_gap_frames", 2))
         )
 
     # ------------------------------------------------------------------
@@ -94,7 +106,15 @@ class VehicleStateStore:
 
         updated_states: list[VehicleState] = []
 
+        detections_by_id: dict[int, DetectionResult] = {}
         for detection in detections:
+            if detection.track_id is None:
+                continue
+            previous = detections_by_id.get(detection.track_id)
+            if previous is None or detection.confidence > previous.confidence:
+                detections_by_id[detection.track_id] = detection
+
+        for detection in detections_by_id.values():
             # I track senza ID assegnato da ByteTrack (es. primo frame
             # o detection momentaneamente non associate) vengono scartati.
             track_id = detection.track_id
@@ -104,6 +124,7 @@ class VehicleStateStore:
             # Calcola il centroide del veicolo come Point2D.
             # Tenta prima dai momenti del poligono, poi dalla bbox come fallback.
             centroid: Point2D = self._compute_detection_centroid(detection)
+            motion_anchor = self._compute_motion_anchor(detection, centroid)
 
             if track_id in self._states:
                 # --- Aggiornamento di un track già noto ---
@@ -111,6 +132,7 @@ class VehicleStateStore:
                     track_id=track_id,
                     detection=detection,
                     centroid=centroid,
+                    motion_anchor=motion_anchor,
                     frame_index=frame_index,
                     stopped_speed_threshold=stopped_speed_threshold,
                 )
@@ -120,8 +142,8 @@ class VehicleStateStore:
                 new_state = self._build_new_state(
                     detection=detection,
                     centroid=centroid,
+                    motion_anchor=motion_anchor,
                     frame_index=frame_index,
-                    stopped_speed_threshold=stopped_speed_threshold,
                 )
                 self._states[track_id] = new_state
                 updated_states.append(new_state)
@@ -174,6 +196,7 @@ class VehicleStateStore:
         track_id: int,
         detection: DetectionResult,
         centroid: Point2D,
+        motion_anchor: Point2D,
         frame_index: int,
         stopped_speed_threshold: float,
     ) -> None:
@@ -201,42 +224,72 @@ class VehicleStateStore:
 
         # Salva i valori del frame precedente prima di sovrascriverli.
         previous_centroid: Point2D | None = state.centroid
+        previous_anchor: Point2D | None = state.motion_anchor or state.centroid
         previous_speed_px: float = state.speed_px
+        frame_delta = frame_index - state.last_seen_frame
+        kinematics_valid = 0 < frame_delta <= self._max_kinematic_gap
 
-        # Calcola la velocità euclidea tra centroide precedente e corrente.
-        # La firma è (prev_centroid, curr_centroid) come da kinematics.py.
-        speed_px: float = compute_speed_px(previous_centroid, centroid)
+        if kinematics_valid:
+            raw_vx, raw_vy = compute_velocity_px(
+                previous_anchor, motion_anchor, frame_delta
+            )
+            if state.observed_frames > 1:
+                velocity_x = exponential_moving_average(
+                    state.velocity_x_px, raw_vx, self._velocity_alpha
+                )
+                velocity_y = exponential_moving_average(
+                    state.velocity_y_px, raw_vy, self._velocity_alpha
+                )
+            else:
+                velocity_x, velocity_y = raw_vx, raw_vy
+            speed_px = (velocity_x ** 2 + velocity_y ** 2) ** 0.5
+            acceleration_px = compute_acceleration(
+                speed_px, previous_speed_px, frame_delta
+            )
+        else:
+            velocity_x = 0.0
+            velocity_y = 0.0
+            speed_px = 0.0
+            acceleration_px = 0.0
 
-        # Accelerazione = differenza di velocità tra frame consecutivi.
-        # Un valore fortemente negativo indica una frenata brusca.
-        acceleration_px: float = compute_acceleration(speed_px, previous_speed_px)
-
-        # Aggiorna il contatore di frame consecutivi in cui il veicolo è fermo.
-        stopped_frames: int = update_stopped_counter(
-            prev_counter=state.stopped_frames,
-            speed_px=speed_px,
-            stopped_speed_threshold=stopped_speed_threshold,
-        )
+        if kinematics_valid and frame_delta == 1:
+            stopped_frames = update_stopped_counter(
+                prev_counter=state.stopped_frames,
+                speed_px=speed_px,
+                stopped_speed_threshold=stopped_speed_threshold,
+            )
+        else:
+            stopped_frames = 0
 
         # Aggiornamento in-place dei campi dello stato.
         # VehicleState ha slots=True: setattr funziona solo per campi esistenti.
         state.prev_centroid = previous_centroid
         state.centroid = centroid
+        state.prev_motion_anchor = previous_anchor
+        state.motion_anchor = motion_anchor
         state.prev_speed_px = previous_speed_px
         state.speed_px = speed_px
         state.acceleration_px = acceleration_px
+        state.velocity_x_px = velocity_x
+        state.velocity_y_px = velocity_y
+        state.kinematics_valid = kinematics_valid
+        state.observed_frames += 1
+        state.confidence = detection.confidence
+        state.class_id = detection.class_id
+        state.class_name = detection.class_name
         state.polygon = detection.polygon
         state.mask = detection.mask
         state.bbox = detection.bbox
         state.last_seen_frame = frame_index
         state.stopped_frames = stopped_frames
+        state.history.append(self._build_sample(state, frame_index))
 
     def _build_new_state(
         self,
         detection: DetectionResult,
         centroid: Point2D,
+        motion_anchor: Point2D,
         frame_index: int,
-        stopped_speed_threshold: float,
     ) -> VehicleState:
         """
         Crea un nuovo VehicleState con valori iniziali per un track appena apparso.
@@ -254,24 +307,12 @@ class VehicleStateStore:
             Centroide calcolato per questo primo frame del track.
         frame_index : int
             Indice del frame corrente (usato come last_seen_frame iniziale).
-        stopped_speed_threshold : float
-            Soglia per inizializzare il contatore di stop (al primo frame
-            la velocità è 0, quindi il veicolo parte già come "fermo").
-
         Returns
         -------
         VehicleState
             Nuovo stato cinematico con tutti i campi popolati.
         """
-        # Al primo frame la velocità è 0: il veicolo parte dal contatore
-        # stopped_frames = 1 (il primo frame lo conta già come fermo).
-        initial_stopped_frames: int = update_stopped_counter(
-            prev_counter=0,
-            speed_px=0.0,
-            stopped_speed_threshold=stopped_speed_threshold,
-        )
-
-        return VehicleState(
+        state = VehicleState(
             track_id=detection.track_id,          # int (già validato non-None)
             class_id=detection.class_id,
             class_name=detection.class_name,
@@ -284,7 +325,45 @@ class VehicleStateStore:
             mask=detection.mask,
             bbox=detection.bbox,
             last_seen_frame=frame_index,
-            stopped_frames=initial_stopped_frames,
+            stopped_frames=0,
+            motion_anchor=motion_anchor,
+            prev_motion_anchor=motion_anchor,
+            kinematics_valid=False,
+            observed_frames=1,
+            confidence=detection.confidence,
+            history=deque(maxlen=self._history_size),
+        )
+        state.history.append(self._build_sample(state, frame_index))
+        return state
+
+    @staticmethod
+    def _compute_motion_anchor(
+        detection: DetectionResult,
+        fallback: Point2D,
+    ) -> Point2D:
+        """Usa il punto inferiore centrale della bbox come ancora di moto."""
+        bbox = detection.bbox
+        if bbox is None or len(bbox) < 4:
+            return fallback
+        x1, _, x2, y2 = bbox[:4]
+        return Point2D(x=(float(x1) + float(x2)) / 2.0, y=float(y2))
+
+    @staticmethod
+    def _build_sample(state: VehicleState, frame_index: int) -> TrackSample:
+        centroid = state.centroid or Point2D(0.0, 0.0)
+        anchor = state.motion_anchor or centroid
+        mask_area = 0
+        if state.mask is not None:
+            mask_area = int((state.mask > 0).sum())
+        return TrackSample(
+            frame_index=frame_index,
+            centroid=centroid,
+            motion_anchor=anchor,
+            speed_px=state.speed_px,
+            velocity_x_px=state.velocity_x_px,
+            velocity_y_px=state.velocity_y_px,
+            acceleration_px=state.acceleration_px,
+            mask_area=mask_area,
         )
 
     def _compute_detection_centroid(self, detection: DetectionResult) -> Point2D:
@@ -331,4 +410,4 @@ class VehicleStateStore:
 
         # Ultimo fallback: origine. Non dovrebbe mai accadere in condizioni
         # normali, ma evita un crash se entrambe polygon e bbox sono None.
-        return Point2D(x=0.0, y=0.0)
+        return Point2D(x=0.0, y=0.0)

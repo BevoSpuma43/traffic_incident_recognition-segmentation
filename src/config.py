@@ -31,7 +31,7 @@ class AppConfig:
     # Percorso del file video da analizzare (relativo alla CWD del processo).
     # Assicurarsi di lanciare lo script dalla root del progetto affinché
     # il path relativo sia risolto correttamente.
-    video_path: str = "dataset/_DbmvhywZZ8_00.mp4"
+    video_path: str = "dataset/real_videos/Z4kg2Ev3vhk_00.mp4"
 
     # Percorso del modello YOLO segmenter (es. yolo26n-seg.pt).
     # Il file deve essere presente nella root del progetto o indicato
@@ -83,6 +83,28 @@ class AppConfig:
     # scatta l'anomalia cinematica. Il valore è negativo perché rappresenta
     # una variazione negativa della velocità (frenata improvvisa).
     strong_deceleration_threshold: float = -4.0
+
+    # Parametri temporali e spaziali del rilevatore di collisioni.
+    motion_history_size: int = 15
+    velocity_ema_alpha: float = 0.45
+    max_kinematic_gap_frames: int = 2
+    mask_overlap_ratio_threshold: float = 0.015
+    contact_distance_threshold_px: float = 8.0
+    mask_dilation_pixels: int = 3
+    min_preimpact_speed_px: float = 3.0
+    min_closing_speed_px: float = 1.5
+    impact_window_frames: int = 5
+    collision_confirmation_frames: int = 2
+    collision_cooldown_frames: int = 30
+    collision_display_frames: int = 15
+    pair_state_ttl_frames: int = 45
+
+    # Se valorizzato, la pipeline salva diagnostica per coppia ed eventi in
+    # JSON Lines, utilizzabile dal modulo src.calibration.
+    calibration_log_path: str = ""
+    # Disattivabile nei benchmark estesi: i record per ogni coppia e frame
+    # possono essere molto voluminosi; gli eventi restano sempre salvati.
+    calibration_log_diagnostics: bool = True
 
     # ------------------------------------------------------------------
     # Opzioni di rendering

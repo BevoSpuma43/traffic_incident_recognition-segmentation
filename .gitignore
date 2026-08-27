@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 
@@ -17,6 +18,8 @@ dataset/
 *.mp4
 *.avi
 *.mkv
+calibration/*.jsonl
+calibration/real/
 # Uncomment the line below if you don't want to track YOLO weights
 # *.pt
 

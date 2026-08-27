@@ -47,28 +47,51 @@ This module acts as the **Orchestrator**. It initializes all other subsystems an
 This file implements the **Vision Layer**. It contains the `VehicleSegmenter` class, which wraps the YOLO model and the ByteTrack algorithm. Its primary responsibility is to accept a raw BGR frame and return a list of `DetectionResult` objects. It abstracts away PyTorch tensors by converting them into standard Python lists and OpenCV-compatible NumPy arrays (polygons, bounding boxes, binary masks), ensuring that the rest of the application does not tightly couple to the Ultralytics API.
 
 ### `tracker_state.py`
-This module acts as the **Memory Store**. The `VehicleStateStore` class maintains a dictionary of all active vehicles. When new detections arrive, it matches them by `track_id`. If it's a new vehicle, it creates a new state; if the vehicle is already known, it calls the kinematics module to calculate the distance traveled since the last frame. Crucially, it manages the lifecycle of the vehicles by removing "stale" tracks (vehicles that left the camera view for too many consecutive frames) to prevent memory leaks and ghost collisions.
+This module acts as the **Memory Store**. The `VehicleStateStore` maintains active vehicles and a bounded history of motion samples. Duplicate detections for one track ID are collapsed by confidence. Motion is measured from the bottom-center bbox anchor, normalized by the observed frame gap, and invalidated after long gaps. Stale tracks are removed to prevent memory leaks and ghost collisions.
 
 ### `kinematics.py`
-A pure math module defining the **Physical Rules**. It operates strictly on generic 2D coordinates without importing any internal project models. It exports pure functions like `compute_speed_px` (which calculates the Euclidean distance or $L_2$ norm between two centroids), `compute_acceleration` (the discrete derivative of speed over frames), and `update_stopped_counter` (which tracks how long a vehicle has remained below a specific velocity threshold).
+A pure math module defining the **Physical Rules**. It operates on generic 2D coordinates without importing internal project models. It exports vector velocity normalized by elapsed frames, scalar speed and acceleration, an exponential moving average, and the consecutive stopped-frame counter.
 
 ### `geometry.py`
 A low-level spatial module defining the **Shape Computations**. It relies heavily on OpenCV and NumPy to process geometric entities. It includes functions like `safe_polygon_array` to normalize raw YOLO shapes into int32 OpenCV arrays, `polygon_to_binary_mask` to render polygons into uint8 full-frame pixel masks, `compute_centroid_from_polygon` which uses image moments ($m_{10}/m_{00}$) to find the precise center of mass, and `mask_intersection_area` which uses bitwise AND operations to calculate the exact overlapping pixel count between two vehicles.
 
 ### `collision_logic.py`
-This module embodies the **Business Logic**. The `CollisionDetector` class evaluates all unique pairs of tracked vehicles in a frame. It queries the geometry module to check if their masks overlap sufficiently, and queries the kinematics module to see if their physical behavior is anomalous (e.g., hard decelerations). It combines these spatial and temporal conditions to emit `CollisionEvent` objects.
+This module embodies the **Business Logic**. The `CollisionDetector` maintains persistent state for every ordered pair of tracks. It combines normalized spatial contact with recent motion, hard deceleration, and movement-to-stop transitions. Candidate evidence is confirmed over time and followed by a cooldown, so a sustained crash produces one event rather than one event per frame.
 
 ## Crash Detection Logic
-The collision detection mechanism, implemented in `src/collision_logic.py` and supported by `src/kinematics.py`, avoids relying solely on bounding box intersections. Bounding boxes are rectangular approximations that often overlap during normal traffic flow due to perspective and occlusion. Instead, the system requires a strict logical conjunction (AND) of two distinct conditions to flag a collision:
+The detector no longer requires exact mask overlap in one frame. Its current flow is:
 
-1.  **Pixel-Level Mask Overlap (`_has_overlap`):** 
-    The system extracts the binary segmentation masks (uint8 arrays) of any given pair of tracked vehicles. Using a bitwise AND operation (defined in `src/geometry.py`), it calculates the exact intersection area in pixels. A collision candidate is only considered if the overlapping area strictly exceeds a predefined threshold (`mask_overlap_threshold`).
-2.  **Kinematic Anomaly:**
-    If the mask overlap condition is met, indicating physical proximity or occlusion, the system then evaluates the temporal kinematic behavior of the involved vehicles to distinguish a crash from a normal passing maneuver. At least one of the following sub-conditions (logical OR) must be true:
-    *   *Dual Stop (`_both_stopped`):* Both vehicles have experienced a simultaneous, prolonged stop. This is evaluated by checking if their speeds have dropped below a threshold (`stopped_speed_threshold`) for a minimum number of consecutive frames (`stopped_frames_threshold`).
-    *   *Hard Deceleration (`_hard_deceleration`):* At least one of the vehicles exhibits an abrupt reduction in speed. This is determined by calculating the frame-to-frame acceleration (current speed minus previous speed) and checking if it falls below a severe negative threshold (`strong_deceleration_threshold`). In typical rear-end collisions, the leading vehicle experiences immense negative acceleration.
+1. **Track kinematics:** a bottom-center motion anchor is measured over the actual frame gap and its velocity is filtered with an exponential moving average. New tracks and tracks returning after a long gap do not provide valid impact evidence.
+2. **Spatial candidate:** bbox distance is used as an inexpensive pre-filter. Exact overlap is evaluated both in pixels and as `intersection/min(mask areas)`. Slightly dilated masks also detect adjacent silhouettes that touch without sharing pixels.
+3. **Temporal evidence:** contact and a dynamic anomaly may occur within `impact_window_frames`. A stop is accepted only if recent history proves that at least one vehicle was moving.
+4. **Confirmation and cooldown:** evidence must persist for `collision_confirmation_frames`; after confirmation, the pair enters cooldown and cannot emit duplicate events.
 
-When both the spatial (overlap) and behavioral (kinematic anomaly) conditions are satisfied, a `CollisionEvent` is appended to the current frame's registry.
+`CollisionEvent` records the strongest overlap, relative closing speed, kinematics, first contact frame, confirmation frame, and an explainable confidence score.
+
+### Calibration and Evaluation
+When `calibration_log_path` is enabled, the pipeline writes JSON Lines records
+for pair-level diagnostics and unique collision events. The `src.calibration`
+module reads `dataset/metadata-real.csv` directly. It records the decoder's
+timestamp for each prediction and compares it with `accident_time`, while
+`accident_frame` remains a parallel metric and a fallback for older logs.
+Predictions are matched one-to-one within a temporal tolerance and delay is
+reported in frames and seconds. The `src.benchmark` runner supports
+dataset splits, accident-type filters, resumable execution, throughput and
+real-time-factor measurements, plus breakdowns by accident type and
+environmental metadata. Pair diagnostics are optional during batch runs
+because their size grows with every vehicle pair and frame.
+
+The current real dataset contains 2,027 metadata rows and 2,027 corresponding
+MP4 files, with no missing or duplicate paths. Its accident distribution is
+680 single-vehicle, 657 t-bone, 328 rear-end, 245 sideswipe, and 117 head-on
+videos. Metadata validation is included in the generated report; two current
+rows place `accident_frame` exactly at `no_frames`, so timestamp-based matching
+is especially important for those end-of-video annotations.
+
+Every real-dataset video contains an annotated accident. Consequently, this
+benchmark measures missed, mistimed, and duplicate detections, but cannot by
+itself estimate the false-alarm rate on accident-free traffic. A representative
+negative-video set is still required for deployment-level precision claims.
 
 ## Issues
 While the current deterministic approach is computationally efficient, explainable, and capable of running on low-end hardware, it is subject to several physical and technical limitations:
@@ -85,4 +108,4 @@ To address the aforementioned issues and push the system towards enterprise-grad
 4.  **Kalman Filter Enhancements:** Tuning the ByteTrack's internal Kalman filter state estimation to better predict a vehicle's position during severe occlusions, maintaining the track ID even when a vehicle is temporarily hidden behind a larger vehicle during a pile-up.
 
 ## Conclusions
-The implemented traffic accident detection system represents a well-structured, modular approach to road safety monitoring. By synergizing deep learning-based instance segmentation with classical deterministic physics (kinematics), it significantly reduces false positives compared to traditional bounding-box intersection methods. While its reliance on 2D pixel-space physics and CPU-bound inference present notable challenges, the project provides a solid, extensible architectural foundation. With future integrations of perspective transformations and model quantization, the system holds strong potential for deployment in embedded traffic surveillance scenarios.
+The implemented traffic accident detection system represents a modular and explainable approach to road safety monitoring. Instance segmentation now supplies spatial candidates while filtered track history and persistent pair state provide temporal confirmation. This reduces the most obvious false positives from stationary traffic and duplicate per-frame alerts, but it does not make mask contact proof of a physical crash. Perspective calibration, video-level validation, and robust ID reassociation remain necessary before deployment.

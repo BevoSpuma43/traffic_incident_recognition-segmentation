@@ -2,10 +2,13 @@ import numpy as np
 import pytest
 
 from src.geometry import (
+    bbox_distance,
     compute_bbox_from_polygon,
     compute_centroid_from_polygon,
     mask_intersection_area,
+    mask_intersection_area_in_roi,
     masks_touch,
+    normalized_overlap,
     polygon_to_binary_mask,
     safe_polygon_array,
 )
@@ -62,11 +65,14 @@ def test_safe_polygon_array_converts_points_to_numpy_array() -> None:
     result = safe_polygon_array(polygon)
 
     assert isinstance(result, np.ndarray)
-    assert result.shape == (4, 2)
+    assert result.shape == (4, 1, 2)
     assert np.issubdtype(result.dtype, np.number)
     np.testing.assert_array_equal(
         result,
-        np.array([[1, 1], [4, 1], [4, 3], [1, 3]], dtype=result.dtype),
+        np.array(
+            [[[1, 1]], [[4, 1]], [[4, 3]], [[1, 3]]],
+            dtype=result.dtype,
+        ),
     )
 
 
@@ -137,3 +143,25 @@ def test_masks_touch_is_false_when_masks_are_separate() -> None:
     mask_b[4:6, 4:6] = 1
 
     assert masks_touch(mask_a, mask_b) is False
+
+
+def test_bbox_distance_is_zero_for_overlapping_boxes() -> None:
+    assert bbox_distance((1, 1, 5, 5), (4, 4, 8, 8)) == pytest.approx(0.0)
+
+
+def test_bbox_distance_measures_gap_between_boxes() -> None:
+    assert bbox_distance((1, 1, 3, 3), (6, 1, 8, 3)) == pytest.approx(3.0)
+
+
+def test_roi_intersection_and_normalized_overlap() -> None:
+    mask_a = np.zeros((20, 20), dtype=np.uint8)
+    mask_b = np.zeros((20, 20), dtype=np.uint8)
+    mask_a[2:8, 2:8] = 1
+    mask_b[5:10, 5:10] = 1
+
+    overlap = mask_intersection_area_in_roi(
+        mask_a, mask_b, (2, 2, 7, 7), (5, 5, 9, 9)
+    )
+
+    assert overlap == 9
+    assert normalized_overlap(overlap, 36, 25) == pytest.approx(9 / 25)

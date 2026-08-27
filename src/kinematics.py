@@ -17,6 +17,7 @@ update_stopped_counter -- contatore di frame consecutivi da fermo
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Protocol
 
 
@@ -27,19 +28,47 @@ class _HasXY(Protocol):
     Qualsiasi oggetto con attributi ``x: float`` e ``y: float`` soddisfa
     questo Protocol, incluso models.Point2D (dopo il fix in models.py).
 
-    ATTENZIONE: tuple[int, int] NON soddisfa questo Protocol perché le
-    tuple non hanno gli attributi ``.x`` e ``.y``. tracker_state.py deve
-    wrappare i valori restituiti da compute_centroid_from_polygon() in un
-    oggetto Point2D prima di passarli a compute_speed_px().
+    Le funzioni pubbliche accettano anche coppie numeriche per agevolare test
+    e integrazioni, pur usando Point2D nel flusso principale.
     """
 
     x: float
     y: float
 
 
+def _coordinates(point: _HasXY | Sequence[float]) -> tuple[float, float]:
+    """Estrae coordinate da Point2D-like o da una coppia numerica."""
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return float(point.x), float(point.y)
+    if isinstance(point, Sequence) and len(point) >= 2:
+        return float(point[0]), float(point[1])
+    raise TypeError("Il punto deve esporre x/y oppure contenere due coordinate")
+
+
+def compute_velocity_px(
+    prev_centroid: _HasXY | Sequence[float] | None,
+    curr_centroid: _HasXY | Sequence[float] | None,
+    frame_delta: int = 1,
+) -> tuple[float, float]:
+    """Calcola il vettore velocita normalizzato per i frame trascorsi."""
+    if prev_centroid is None or curr_centroid is None or frame_delta <= 0:
+        return 0.0, 0.0
+    prev_x, prev_y = _coordinates(prev_centroid)
+    curr_x, curr_y = _coordinates(curr_centroid)
+    delta = float(frame_delta)
+    return (curr_x - prev_x) / delta, (curr_y - prev_y) / delta
+
+
+def exponential_moving_average(previous: float, current: float, alpha: float) -> float:
+    """Filtra un valore imponendo alpha nell'intervallo [0, 1]."""
+    weight = min(1.0, max(0.0, float(alpha)))
+    return weight * float(current) + (1.0 - weight) * float(previous)
+
+
 def compute_speed_px(
-    prev_centroid: _HasXY | None,
-    curr_centroid: _HasXY | None,
+    prev_centroid: _HasXY | Sequence[float] | None,
+    curr_centroid: _HasXY | Sequence[float] | None,
+    frame_delta: int = 1,
 ) -> float:
     """
     Calcola la velocità istantanea di un veicolo come distanza euclidea
@@ -80,16 +109,18 @@ def compute_speed_px(
     if prev_centroid is None or curr_centroid is None:
         return 0.0
 
-    # Componenti dello spostamento frame-to-frame in pixel.
-    dx = float(curr_centroid.x) - float(prev_centroid.x)
-    dy = float(curr_centroid.y) - float(prev_centroid.y)
+    dx, dy = compute_velocity_px(prev_centroid, curr_centroid, frame_delta)
 
     # math.hypot è numericamente più stabile di sqrt(dx**2 + dy**2)
     # perché evita overflow/underflow su valori molto grandi o molto piccoli.
     return math.hypot(dx, dy)
 
 
-def compute_acceleration(curr_speed: float, prev_speed: float) -> float:
+def compute_acceleration(
+    curr_speed: float,
+    prev_speed: float,
+    frame_delta: int = 1,
+) -> float:
     """
     Calcola l'accelerazione frame-to-frame come variazione della velocità.
 
@@ -116,13 +147,17 @@ def compute_acceleration(curr_speed: float, prev_speed: float) -> float:
     """
     # Differenza finita del primo ordine: approssimazione discreta della
     # derivata della velocità rispetto al tempo (in unità di frame).
-    return float(curr_speed) - float(prev_speed)
+    if frame_delta <= 0:
+        return 0.0
+    return (float(curr_speed) - float(prev_speed)) / float(frame_delta)
 
 
 def update_stopped_counter(
-    prev_counter: int,
-    speed_px: float,
-    stopped_speed_threshold: float,
+    prev_counter: int | None = None,
+    speed_px: float = 0.0,
+    stopped_speed_threshold: float = 0.0,
+    *,
+    stopped_counter: int | None = None,
 ) -> int:
     """
     Aggiorna il contatore di frame consecutivi in cui il veicolo è fermo.
@@ -158,6 +193,10 @@ def update_stopped_counter(
     e documentato qui per eliminare il try/except di fallback in
     tracker_state.py._update_stopped_counter(), che sarà rimosso in step 5.
     """
+    # ``stopped_counter`` mantiene compatibilita con i chiamanti precedenti.
+    if prev_counter is None:
+        prev_counter = 0 if stopped_counter is None else stopped_counter
+
     # Il veicolo è considerato fermo se la sua velocità non supera la soglia.
     # Il confronto usa <= per includere velocità esattamente uguali alla soglia.
     if speed_px <= stopped_speed_threshold:
@@ -166,4 +205,4 @@ def update_stopped_counter(
 
     # Il veicolo si è mosso: azzera il contatore per ricominciare a contare
     # dal prossimo stop consecutivo.
-    return 0
+    return 0

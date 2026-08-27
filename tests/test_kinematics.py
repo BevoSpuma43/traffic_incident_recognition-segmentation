@@ -5,6 +5,8 @@ import pytest
 from src.kinematics import (
     compute_acceleration,
     compute_speed_px,
+    compute_velocity_px,
+    exponential_moving_average,
     update_stopped_counter,
 )
 
@@ -37,6 +39,18 @@ def test_compute_acceleration_returns_negative_value_for_deceleration() -> None:
     acceleration = compute_acceleration(2.0, 5.0)
 
     assert acceleration == pytest.approx(-3.0)
+
+
+def test_velocity_is_normalized_by_elapsed_frames() -> None:
+    vx, vy = compute_velocity_px((0.0, 0.0), (6.0, 8.0), frame_delta=2)
+
+    assert vx == pytest.approx(3.0)
+    assert vy == pytest.approx(4.0)
+    assert compute_speed_px((0.0, 0.0), (6.0, 8.0), frame_delta=2) == pytest.approx(5.0)
+
+
+def test_exponential_moving_average_filters_current_value() -> None:
+    assert exponential_moving_average(10.0, 0.0, 0.25) == pytest.approx(7.5)
 
 
 def test_update_stopped_counter_increments_when_speed_is_below_threshold() -> None:

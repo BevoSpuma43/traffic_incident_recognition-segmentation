@@ -20,6 +20,7 @@ masks_touch                -- booleano: le due maschere si toccano?
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import cv2
@@ -288,4 +289,93 @@ def masks_touch(
     bool
         True se le maschere si toccano (overlap > 0 pixel), False altrimenti.
     """
-    return mask_intersection_area(mask_a, mask_b) > 0
+    return mask_intersection_area(mask_a, mask_b) > 0
+
+
+def bbox_distance(
+    bbox_a: tuple[int, int, int, int] | None,
+    bbox_b: tuple[int, int, int, int] | None,
+) -> float:
+    """Distanza euclidea minima tra due bounding box axis-aligned."""
+    if bbox_a is None or bbox_b is None:
+        return math.inf
+    ax1, ay1, ax2, ay2 = bbox_a
+    bx1, by1, bx2, by2 = bbox_b
+    dx = max(float(ax1 - bx2), float(bx1 - ax2), 0.0)
+    dy = max(float(ay1 - by2), float(by1 - ay2), 0.0)
+    return math.hypot(dx, dy)
+
+
+def mask_intersection_area_in_roi(
+    mask_a: np.ndarray | None,
+    mask_b: np.ndarray | None,
+    bbox_a: tuple[int, int, int, int] | None,
+    bbox_b: tuple[int, int, int, int] | None,
+    padding: int = 0,
+) -> int:
+    """Calcola l'intersezione limitandola all'unione locale delle bbox."""
+    if (
+        mask_a is None
+        or mask_b is None
+        or bbox_a is None
+        or bbox_b is None
+        or mask_a.shape != mask_b.shape
+        or mask_a.ndim < 2
+    ):
+        return 0
+    height, width = mask_a.shape[:2]
+    x1 = max(0, min(bbox_a[0], bbox_b[0]) - padding)
+    y1 = max(0, min(bbox_a[1], bbox_b[1]) - padding)
+    x2 = min(width, max(bbox_a[2], bbox_b[2]) + padding + 1)
+    y2 = min(height, max(bbox_a[3], bbox_b[3]) + padding + 1)
+    if x1 >= x2 or y1 >= y2:
+        return 0
+    intersection = cv2.bitwise_and(mask_a[y1:y2, x1:x2], mask_b[y1:y2, x1:x2])
+    return int(np.count_nonzero(intersection > 0))
+
+
+def normalized_overlap(
+    overlap_area: int,
+    area_a: int,
+    area_b: int,
+) -> float:
+    """Normalizza l'intersezione rispetto alla sagoma piu piccola."""
+    denominator = min(int(area_a), int(area_b))
+    if denominator <= 0:
+        return 0.0
+    return float(overlap_area) / float(denominator)
+
+
+def dilated_masks_touch_in_roi(
+    mask_a: np.ndarray | None,
+    mask_b: np.ndarray | None,
+    bbox_a: tuple[int, int, int, int] | None,
+    bbox_b: tuple[int, int, int, int] | None,
+    dilation_pixels: int,
+) -> bool:
+    """Verifica la prossimita delle sagome tramite dilatazione locale."""
+    radius = max(0, int(dilation_pixels))
+    if radius == 0:
+        return mask_intersection_area_in_roi(mask_a, mask_b, bbox_a, bbox_b) > 0
+    if (
+        mask_a is None
+        or mask_b is None
+        or bbox_a is None
+        or bbox_b is None
+        or mask_a.shape != mask_b.shape
+        or mask_a.ndim < 2
+    ):
+        return False
+    height, width = mask_a.shape[:2]
+    x1 = max(0, min(bbox_a[0], bbox_b[0]) - radius)
+    y1 = max(0, min(bbox_a[1], bbox_b[1]) - radius)
+    x2 = min(width, max(bbox_a[2], bbox_b[2]) + radius + 1)
+    y2 = min(height, max(bbox_a[3], bbox_b[3]) + radius + 1)
+    if x1 >= x2 or y1 >= y2:
+        return False
+    kernel_size = radius * 2 + 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    region_a = (mask_a[y1:y2, x1:x2] > 0).astype(np.uint8)
+    region_b = (mask_b[y1:y2, x1:x2] > 0).astype(np.uint8)
+    dilated_a = cv2.dilate(region_a, kernel, iterations=1)
+    return bool(np.any((dilated_a > 0) & (region_b > 0)))

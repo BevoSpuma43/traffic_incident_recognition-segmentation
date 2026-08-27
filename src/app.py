@@ -19,9 +19,11 @@ Dipendenze interne:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from collections.abc import Iterable
+from dataclasses import replace
 
 import cv2
 
@@ -51,7 +53,28 @@ def main() -> None:
     """
     # Carica la configurazione dal default: usa load_default_config() che
     # restituisce un AppConfig gia popolato con tutti i valori di default.
+    parser = argparse.ArgumentParser(description="Traffic accident detector")
+    parser.add_argument("--video", help="Video da analizzare")
+    parser.add_argument("--model", help="Modello YOLO segmentation")
+    parser.add_argument("--calibration-log", help="Output diagnostico JSONL")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Non apre la finestra OpenCV (utile per calibrazione batch)",
+    )
+    args = parser.parse_args()
+
     config: AppConfig = load_default_config()
+    config = replace(
+        config,
+        video_path=args.video or config.video_path,
+        model_path=args.model or config.model_path,
+        calibration_log_path=(
+            args.calibration_log
+            if args.calibration_log is not None
+            else config.calibration_log_path
+        ),
+    )
 
     # Apertura del file video tramite OpenCV VideoCapture.
     video_path: str = getattr(config, "video_path", "")
@@ -60,12 +83,13 @@ def main() -> None:
         print(f"[ERRORE] Impossibile aprire la sorgente video: '{video_path}'")
         return
 
-    # Inizializzazione della pipeline completa (YOLO + tracker + collision detector).
-    pipeline = TrafficAccidentPipeline(config)
-
     frame_index: int = 0
+    video_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    pipeline: TrafficAccidentPipeline | None = None
 
     try:
+        # Inizializzazione della pipeline completa (YOLO + tracker + collision detector).
+        pipeline = TrafficAccidentPipeline(config)
         while True:
             success, frame = capture.read()
             if not success:
@@ -75,10 +99,18 @@ def main() -> None:
             # process_frame restituisce sempre (annotated_frame, list[CollisionEvent]).
             # annotated_frame: frame BGR con maschere, centroidi e alert CRASH disegnati.
             # collision_events: lista degli eventi rilevati nel frame corrente.
-            annotated_frame, collision_events = pipeline.process_frame(frame, frame_index)
+            timestamp_s = float(capture.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+            if frame_index > 0 and timestamp_s <= 0.0 and video_fps > 0.0:
+                timestamp_s = frame_index / video_fps
+            annotated_frame, collision_events = pipeline.process_frame(
+                frame,
+                frame_index,
+                timestamp_s=timestamp_s,
+            )
 
             # Mostra il frame annotato nella finestra OpenCV.
-            cv2.imshow("Traffic Accident Segmentation", annotated_frame)
+            if not args.headless:
+                cv2.imshow("Traffic Accident Segmentation", annotated_frame)
 
             # Stampa sulla console gli eventi di collisione rilevati in questo frame.
             _log_collisions(collision_events, frame_index)
@@ -86,12 +118,15 @@ def main() -> None:
             frame_index += 1
 
             # Attende 1 ms per il prossimo frame e controlla il tasto 'q'.
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
+            if not args.headless:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
 
     finally:
         # Rilascio garantito delle risorse anche in caso di eccezione.
+        if pipeline is not None:
+            pipeline.close()
         capture.release()
         cv2.destroyAllWindows()
 
@@ -130,6 +165,9 @@ def _log_collisions(
         frame_number = getattr(event, "frame_index", current_frame_index)
         overlap_area = getattr(event, "overlap_area", None)
         reason = getattr(event, "reason", "")
+        overlap_ratio = getattr(event, "overlap_ratio", None)
+        confidence = getattr(event, "confidence", None)
+        first_contact = getattr(event, "first_contact_frame", None)
 
         # Costruisce il messaggio di log in modo incrementale.
         message = f"[COLLISION] frame={frame_number}"
@@ -143,6 +181,15 @@ def _log_collisions(
 
         if reason:
             message += f" reason={reason}"
+
+        if overlap_ratio is not None:
+            message += f" overlap_ratio={float(overlap_ratio):.3f}"
+
+        if confidence is not None:
+            message += f" confidence={float(confidence):.2f}"
+
+        if first_contact is not None:
+            message += f" first_contact={first_contact}"
 
         print(message)
 

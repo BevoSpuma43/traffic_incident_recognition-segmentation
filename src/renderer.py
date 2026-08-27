@@ -469,9 +469,13 @@ def draw_collisions(
                 cv2.circle(output, centroid, 8, _CRASH_COLOR, 2, lineType=cv2.LINE_AA)
 
             label_pos = _label_anchor(state)
+            confidence = float(getattr(collision, "confidence", 0.0))
+            label = "CRASH?"
+            if confidence > 0.0:
+                label = f"CRASH? {confidence:.0%}"
             cv2.putText(
                 output,
-                "CRASH?",
+                label,
                 label_pos,
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,

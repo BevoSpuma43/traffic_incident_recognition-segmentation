@@ -1,6 +1,6 @@
 # Traffic Accident Segmentation System
 
-Questo progetto è un sistema avanzato per il rilevamento di incidenti stradali a partire da flussi video. Sfrutta **YOLOv8** per la segmentazione e il tracking (ByteTrack) dei veicoli, accoppiato ad un solido motore cinematico per l'analisi del movimento e la rilevazione di collisioni.
+Questo progetto è un sistema per il rilevamento di incidenti stradali a partire da flussi video. Sfrutta un modello **Ultralytics YOLO segmentation** per segmentazione e tracking (ByteTrack) dei veicoli, insieme a un motore cinematico temporale per la rilevazione delle collisioni.
 
 ---
 
@@ -79,47 +79,43 @@ Calcola inoltre i centroidi usando i momenti geometrici via `cv2.moments(polygon
 ---
 
 ### 6. `src/kinematics.py`
-Funzioni pure per la valutazione della cinematica in spazio pixel. Usa un protocollo `_HasXY` per ottenere le coordinate spaziali senza legarsi ad una implementazione concreta.
+Funzioni pure per la cinematica in spazio pixel. Calcolano il vettore velocità
+normalizzandolo per i frame trascorsi e applicano un filtro EMA per ridurre il
+jitter del tracker.
 **Pezzi di codice chiave:**
 ```python
-def compute_speed_px(prev_centroid: _HasXY | None, curr_centroid: _HasXY | None) -> float:
-    # Calcolo della norma L2 stabile
-    dx = float(curr_centroid.x) - float(prev_centroid.x)
-    dy = float(curr_centroid.y) - float(prev_centroid.y)
-    return math.hypot(dx, dy)
+vx, vy = compute_velocity_px(previous_anchor, motion_anchor, frame_delta)
+speed_px = math.hypot(vx, vy)
 ```
-Calcola la velocità (pixel/frame), l'accelerazione (differenza delle velocità) ed espone un contatore per capire da quanti frame un veicolo è fermo.
+Espone inoltre accelerazione e contatore di stop consecutivo.
 
 ---
 
 ### 7. `src/tracker_state.py`
 Implementa lo store `VehicleStateStore` che mantiene lo storico frame-to-frame di ogni traccia assegnata da ByteTrack.
-Esegue l'aggiornamento dei centroidi, il ricalcolo della cinematica e la pulizia dei track vecchi (stale).
+Usa il punto inferiore centrale della bbox come ancora di moto, conserva una
+storia limitata e invalida la cinematica dopo gap troppo lunghi.
 **Pezzi di codice chiave:**
 ```python
-speed_px: float = compute_speed_px(previous_centroid, centroid)
-acceleration_px: float = compute_acceleration(speed_px, previous_speed_px)
-state.speed_px = speed_px
-state.acceleration_px = acceleration_px
+kinematics_valid = 0 < frame_delta <= max_kinematic_gap_frames
+state.history.append(track_sample)
 ```
 Questo modulo fa da ponte tra il layer di YOLO/ByteTrack e il layer della pura logica di collisione.
 
 ---
 
 ### 8. `src/collision_logic.py`
-Core del sistema che rileva gli incidenti. Verifica le coppie di veicoli applicando l'euristica basata su: sovrapposizione maschere + anomalia cinematica (fermata simultanea o decelerazione anomala).
-**Pezzi di codice chiave:**
-```python
-# Anomalia cinematica 1: Dual Stop (entrambi fermi)
-dual_stop = self._both_stopped(vehicle_a, vehicle_b)
+Core temporale del sistema. Per ogni coppia mantiene uno stato persistente e
+combina due famiglie di evidenze:
 
-# Anomalia cinematica 2: Hard Deceleration (frenata brusca)
-hard_deceleration = self._hard_deceleration(vehicle_a, vehicle_b)
+- contatto spaziale: overlap assoluto o normalizzato, oppure contatto tra
+  maschere dilatate per riconoscere sagome adiacenti senza pixel condivisi;
+- dinamica: decelerazione brusca, transizione movimento-arresto e dual stop
+  solo quando esiste movimento precedente.
 
-# Controllo sovrapposizione maschere
-has_overlap, overlap_area = self._has_overlap(vehicle_a, vehicle_b)
-```
-Se unisce un overlap positivo e una di queste due anomalie, l'evento di collisione `CollisionEvent` viene emesso.
+Le evidenze possono cadere in frame vicini grazie a una finestra temporale.
+Un candidato deve essere confermato più volte e, dopo l'emissione, la coppia
+entra in cooldown per evitare un evento duplicato a ogni frame.
 
 ---
 
@@ -176,3 +172,58 @@ self._worker_thread.start()
 - `tests/test_geometry.py`: Verifica che funzioni cruciali come `compute_centroid_from_polygon` e `mask_intersection_area` siano matematicamente ineccepibili.
 - `tests/test_kinematics.py`: Testa l'accuratezza del calcolo distanza euclidea (`compute_speed_px`) e l'accelerazione per prevenire falsi positivi nel modulo cinematico.
 - `tests/test_collision_logic.py`: Testa la business logic del collision detector fornendo falsi stati simulati ed accertando che le soglie restituiscano le corrette collisioni limitando l'overlap insufficiente o comportamenti cinematici falsati.
+
+---
+
+## Benchmark sul dataset reale
+
+Il progetto legge direttamente `dataset/metadata-real.csv`: ogni riga viene
+associata al video omonimo in `dataset/real_videos`. Il timestamp effettivo
+restituito dal decoder viene confrontato con `accident_time`; `accident_frame`
+rimane il riferimento parallelo e il fallback per i log che non contengono il
+tempo decodificato.
+
+Il dataset attuale è stato verificato: contiene 2.027 righe e altrettanti MP4,
+senza path mancanti o duplicati. Le classi sono 680 `single`, 657 `t-bone`,
+328 `rear-end`, 245 `sideswipe` e 117 `head-on`; lo split in-distribution è
+composto da 507 video train e 1.520 test. Il riepilogo `ground_truth` del report
+segnala inoltre automaticamente timestamp incoerenti e frame fuori intervallo.
+
+Per una prova rapida su 10 video del test set:
+
+```powershell
+python -m src.benchmark `
+  --metadata dataset/metadata-real.csv `
+  --dataset-root dataset `
+  --split-field split_in_distribution `
+  --split test `
+  --limit 10 `
+  --resume
+```
+
+Il comando elabora i video senza rendering, salva un JSONL per video in
+`calibration/real` e genera `calibration/real/report.json`. Il report contiene
+precision, recall, F1, ritardo di rilevamento, throughput, fattore real-time e
+metriche separate per tipo di incidente, rollover, scenario, meteo, fascia
+oraria e qualità. La tolleranza predefinita è di 1 secondo; può essere cambiata con
+`--tolerance-seconds` o `--tolerance-frames`.
+
+Per calibrare le soglie su un sottoinsieme ristretto si può aggiungere
+`--diagnostics`: vengono registrate anche le evidenze di ogni coppia per ogni
+frame. Questa opzione è volutamente disattivata nel benchmark normale perché
+può produrre file molto grandi. Per valutare log già esistenti:
+
+```powershell
+python -m src.calibration `
+  --log calibration/real/NOME_VIDEO.jsonl `
+  --annotations dataset/metadata-real.csv `
+  --tolerance-seconds 1
+```
+
+Il vecchio formato a intervalli JSON (`calibration/annotations.example.json`)
+rimane supportato per annotazioni manuali con inizio e fine dell'impatto.
+
+Il dataset reale contiene un incidente annotato per ciascun video. Permette
+quindi di misurare rilevamenti mancati, eventi fuori finestra e duplicati, ma
+non stima da solo il tasso di falsi allarmi su video senza incidenti: per una
+precisione operativa completa serve anche un insieme negativo.
