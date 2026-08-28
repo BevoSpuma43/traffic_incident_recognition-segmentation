@@ -871,6 +871,68 @@ def test_crossing_dual_stop_without_tracking_gap_is_ignored() -> None:
     assert detector.last_diagnostics[0].bridged_dual_stop is False
 
 
+def test_strong_impact_after_tracking_gap_is_confirmed_immediately() -> None:
+    detector = _detector(
+        collision_confirmation_frames=2,
+        crossing_dual_stop_bridge_frames=12,
+        crossing_dual_stop_min_gap_frames=2,
+    )
+    approach_a = _make_mask(2, 2, 8, 7)
+    approach_b = _make_mask(2, 12, 8, 17)
+    contact_a = _make_mask(2, 4, 10, 12)
+    contact_b = _make_mask(4, 7, 12, 15)
+
+    assert detector.detect_collisions(
+        [
+            _state(
+                190,
+                approach_a,
+                0,
+                speed=6.0,
+                velocity_x=6.0,
+                history_speeds=(6.0, 6.0),
+            ),
+            _state(
+                191,
+                approach_b,
+                0,
+                speed=6.0,
+                velocity_x=-6.0,
+                history_speeds=(6.0, 6.0),
+            ),
+        ],
+        0,
+    ) == []
+    assert detector.detect_collisions([], 1) == []
+    assert detector.detect_collisions([], 2) == []
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                190,
+                contact_a,
+                3,
+                speed=1.0,
+                acceleration=-6.0,
+                history_speeds=(6.0, 6.0, 1.0),
+            ),
+            _state(
+                191,
+                contact_b,
+                3,
+                speed=3.0,
+                history_speeds=(6.0, 6.0, 3.0),
+            ),
+        ],
+        3,
+    )
+
+    assert len(events) == 1
+    assert "occlusion_bridge" in events[0].reason
+    assert detector.last_diagnostics[0].observation_gap_frames == 2
+    assert detector.last_diagnostics[0].bridged_strong_impact is True
+
+
 def test_dilated_only_contact_does_not_reuse_stale_dynamic_evidence() -> None:
     detector = _detector(collision_confirmation_frames=2)
     mask_a = _make_mask(2, 2, 8, 5)

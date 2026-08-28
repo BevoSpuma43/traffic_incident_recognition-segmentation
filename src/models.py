@@ -262,6 +262,7 @@ class PairDiagnostic:
     target_impulse: bool
     observation_gap_frames: int
     bridged_dual_stop: bool
+    bridged_strong_impact: bool
     reaction_frames: int
     contact_age_frames: int
     candidate_frames: int

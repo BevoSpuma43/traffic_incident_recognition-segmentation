@@ -400,6 +400,7 @@ class CollisionDetector:
                         crossing_trajectories=crossing_trajectories,
                         target_impulse=target_impulse,
                         bridged_dual_stop=False,
+                        bridged_strong_impact=False,
                         emitted=False,
                     )
                     continue
@@ -462,6 +463,14 @@ class CollisionDetector:
                 strong_overlap = pair_state.max_overlap_ratio >= max(
                     0.05, self.mask_overlap_ratio_threshold * 2.0
                 )
+                recent_observation_gap = (
+                    pair_state.last_observation_gap_frame is not None
+                    and 0
+                    <= frame_index - pair_state.last_observation_gap_frame
+                    <= self.crossing_dual_stop_bridge_frames
+                    and pair_state.observation_gap_frames
+                    >= self.crossing_dual_stop_min_gap_frames
+                )
                 contact_age = self._contact_age(pair_state, frame_index)
                 fresh_contact = (
                     self.max_contact_candidate_age_frames == 0
@@ -505,10 +514,23 @@ class CollisionDetector:
                     <= frame_index - pair_state.last_observation_gap_frame
                     <= self.crossing_dual_stop_bridge_frames
                 )
+                bridged_strong_impact = (
+                    spatial.contact
+                    and spatial.overlap_area > 0
+                    and strong_overlap
+                    and had_motion
+                    and pair_state.sustained_approach
+                    and recent_observation_gap
+                    and (
+                        pair_state.saw_hard_deceleration
+                        or crossing_disruption
+                    )
+                )
                 crossing_evidence_is_valid = (
                     not crossing_context
                     or crossing_disruption
                     or bridged_dual_stop
+                    or bridged_strong_impact
                 )
                 high_confidence_crossing_impulse = (
                     crossing_trajectories
@@ -530,6 +552,7 @@ class CollisionDetector:
                         fresh_contact
                         or late_stationary_impact
                         or bridged_dual_stop
+                        or bridged_strong_impact
                     )
                     and has_recent_dynamic
                     and had_motion
@@ -541,14 +564,21 @@ class CollisionDetector:
                         or late_stationary_impact
                         or high_confidence_crossing_impulse
                         or bridged_dual_stop
+                        or bridged_strong_impact
                         or (strong_overlap and pair_state.saw_hard_deceleration)
                     )
                 ):
                     pair_state.status = "contact_candidate"
-                    pair_state.saw_occlusion_bridge |= bridged_dual_stop
+                    pair_state.saw_occlusion_bridge |= (
+                        bridged_dual_stop or bridged_strong_impact
+                    )
                     pair_state.candidate_frames += (
                         self.collision_confirmation_frames
-                        if high_confidence_crossing_impulse or bridged_dual_stop
+                        if (
+                            high_confidence_crossing_impulse
+                            or bridged_dual_stop
+                            or bridged_strong_impact
+                        )
                         else 1
                     )
                 elif not has_recent_contact:
@@ -589,6 +619,7 @@ class CollisionDetector:
                     crossing_trajectories=crossing_trajectories,
                     target_impulse=target_impulse,
                     bridged_dual_stop=bridged_dual_stop,
+                    bridged_strong_impact=bridged_strong_impact,
                     emitted=emitted,
                 )
 
@@ -897,6 +928,7 @@ class CollisionDetector:
         crossing_trajectories: bool,
         target_impulse: bool,
         bridged_dual_stop: bool,
+        bridged_strong_impact: bool,
         emitted: bool,
     ) -> None:
         self.last_diagnostics.append(
@@ -924,6 +956,7 @@ class CollisionDetector:
                 target_impulse=target_impulse,
                 observation_gap_frames=pair_state.observation_gap_frames,
                 bridged_dual_stop=bridged_dual_stop,
+                bridged_strong_impact=bridged_strong_impact,
                 reaction_frames=pair_state.reaction_frames,
                 contact_age_frames=self._contact_age(pair_state, frame_index),
                 candidate_frames=pair_state.candidate_frames,
@@ -997,6 +1030,11 @@ class CollisionDetector:
             pair_state.last_crossing_approach_frame, frame_index
         ):
             pair_state.last_crossing_approach_frame = None
+        if (
+            pair_state.last_observation_gap_frame is not None
+            and frame_index - pair_state.last_observation_gap_frame
+            > self.crossing_dual_stop_bridge_frames
+        ):
             pair_state.last_observation_gap_frame = None
             pair_state.observation_gap_frames = 0
 
