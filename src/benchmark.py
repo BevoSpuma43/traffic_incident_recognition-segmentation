@@ -29,6 +29,7 @@ def select_annotations(
     split_field: str | None = None,
     split: str | None = None,
     accident_types: set[str] | None = None,
+    video_names: set[str] | None = None,
     limit: int | None = None,
 ) -> list[Annotation]:
     selected = annotations
@@ -42,6 +43,13 @@ def select_annotations(
         normalized_types = {value.casefold() for value in accident_types}
         selected = [
             item for item in selected if item.label.casefold() in normalized_types
+        ]
+    if video_names:
+        normalized_names = {Path(value).name.casefold() for value in video_names}
+        selected = [
+            item
+            for item in selected
+            if Path(item.video_path).name.casefold() in normalized_names
         ]
     return selected[: max(0, limit)] if limit is not None else selected
 
@@ -170,6 +178,12 @@ def main() -> None:
     )
     parser.add_argument("--split", choices=("train", "test"))
     parser.add_argument("--type", action="append", dest="accident_types")
+    parser.add_argument(
+        "--video",
+        action="append",
+        dest="video_names",
+        help="Nome o path di un video specifico; opzione ripetibile",
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -186,6 +200,7 @@ def main() -> None:
         split_field=args.split_field,
         split=args.split,
         accident_types=set(args.accident_types or []),
+        video_names=set(args.video_names or []),
         limit=args.limit,
     )
     output_dir = Path(args.output_dir)
@@ -262,6 +277,7 @@ def main() -> None:
             "split_field": args.split_field,
             "split": args.split,
             "types": args.accident_types or [],
+            "videos": args.video_names or [],
             "selected_videos": len(annotations),
             "completed_videos": len(completed_logs),
         },

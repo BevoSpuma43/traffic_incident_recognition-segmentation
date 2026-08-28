@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, TextIO
 
 from src.config import AppConfig
-from src.models import CollisionEvent, PairDiagnostic
+from src.models import CollisionEvent, PairDiagnostic, VehicleState
 
 
 class CalibrationRecorder:
@@ -29,7 +29,7 @@ class CalibrationRecorder:
         self._write(
             {
                 "kind": "metadata",
-                "schema_version": 1,
+                "schema_version": 2,
                 "video_path": self._video_path,
                 "config": asdict(config),
             }
@@ -44,6 +44,7 @@ class CalibrationRecorder:
         timestamp_s: float | None = None,
         detection_count: int | None = None,
         active_track_count: int | None = None,
+        vehicle_states: Iterable[VehicleState] = (),
     ) -> None:
         timestamp_data = (
             {"timestamp_s": float(timestamp_s)} if timestamp_s is not None else {}
@@ -52,6 +53,7 @@ class CalibrationRecorder:
         if self._record_diagnostics:
             diagnostic_items = list(diagnostics)
             event_items = list(events)
+            state_items = list(vehicle_states)
             self._write(
                 {
                     "kind": "frame",
@@ -72,6 +74,31 @@ class CalibrationRecorder:
                         "video_path": self._video_path,
                         **timestamp_data,
                         **asdict(diagnostic),
+                    }
+                )
+                wrote_record = True
+            for state in state_items:
+                anchor = state.motion_anchor or state.centroid
+                self._write(
+                    {
+                        "kind": "track",
+                        "video_path": self._video_path,
+                        **timestamp_data,
+                        "frame_index": frame_index,
+                        "track_id": state.track_id,
+                        "class_name": state.class_name,
+                        "bbox": list(state.bbox) if state.bbox is not None else None,
+                        "anchor_x": float(anchor.x) if anchor is not None else None,
+                        "anchor_y": float(anchor.y) if anchor is not None else None,
+                        "speed_px": state.speed_px,
+                        "velocity_x_px": state.velocity_x_px,
+                        "velocity_y_px": state.velocity_y_px,
+                        "acceleration_px": state.acceleration_px,
+                        "stopped_frames": state.stopped_frames,
+                        "kinematics_valid": state.kinematics_valid,
+                        "observed_frames": state.observed_frames,
+                        "history_length": len(state.history),
+                        "confidence": state.confidence,
                     }
                 )
                 wrote_record = True
@@ -308,12 +335,17 @@ def evaluate_records(
 def summarize_diagnostics(
     records: Iterable[dict[str, object]],
 ) -> dict[str, object]:
+    items = list(records)
     diagnostics = [
-        record for record in records if record.get("kind") == "diagnostic"
+        record for record in items if record.get("kind") == "diagnostic"
     ]
-    frames = [record for record in records if record.get("kind") == "frame"]
+    frames = [record for record in items if record.get("kind") == "frame"]
+    tracks = [record for record in items if record.get("kind") == "track"]
     contacts = [record for record in diagnostics if bool(record.get("contact"))]
     emitted = [record for record in diagnostics if bool(record.get("emitted"))]
+    preexisting = [
+        record for record in diagnostics if bool(record.get("preexisting_contact"))
+    ]
     return {
         "frame_rows": len(frames),
         "frames_with_detections": sum(
@@ -326,7 +358,19 @@ def summarize_diagnostics(
             (int(record.get("active_track_count") or 0) for record in frames),
             default=0,
         ),
+        "track_rows": len(tracks),
+        "unique_track_ids": len(
+            {
+                (
+                    str(record.get("video_path") or ""),
+                    int(record["track_id"]),
+                )
+                for record in tracks
+                if record.get("track_id") is not None
+            }
+        ),
         "diagnostic_rows": len(diagnostics),
+        "preexisting_contact_rows": len(preexisting),
         "contact_rows": len(contacts),
         "emitted_rows": len(emitted),
         "contact_overlap_ratio": _distribution(

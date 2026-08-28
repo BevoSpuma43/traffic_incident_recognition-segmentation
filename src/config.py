@@ -92,12 +92,49 @@ class AppConfig:
     contact_distance_threshold_px: float = 8.0
     mask_dilation_pixels: int = 3
     min_preimpact_speed_px: float = 3.0
+    # Numero minimo di campioni consecutivi sopra la velocita pre-impatto.
+    # Evita che un singolo salto della maschera venga interpretato come moto.
+    motion_confirmation_frames: int = 3
     min_closing_speed_px: float = 1.5
+    # L'avvicinamento relativo deve essere continuo: un singolo picco dovuto
+    # alla prospettiva o alla maschera non dimostra una traiettoria convergente.
+    approach_confirmation_frames: int = 3
+    approach_evidence_window_frames: int = 2
     impact_window_frames: int = 5
+    # Memoria separata usata per stimare la direzione abituale del veicolo.
+    # Non prolunga la validita di overlap o frenate isolate.
+    trajectory_history_frames: int = 12
+    trajectory_reaction_lag_frames: int = 2
+    trajectory_min_displacement_px: float = 12.0
+    trajectory_deflection_angle_deg: float = 45.0
+    # Due direzioni sono considerate incrociate quando formano almeno questo
+    # angolo (ignorando il verso opposto sulla stessa direttrice).
+    crossing_history_frames: int = 6
+    crossing_min_angle_deg: float = 45.0
+    # Accelerazione positiva improvvisa del veicolo inizialmente piu lento:
+    # rappresenta il trasferimento di moto tipico del veicolo colpito.
+    target_impulse_acceleration_threshold: float = 8.0
+    # Collega avvicinamento e doppio arresto attraverso una breve occlusione
+    # del tracker, tipica del momento in cui due sagome entrano in collisione.
+    crossing_dual_stop_bridge_frames: int = 12
+    crossing_dual_stop_min_gap_frames: int = 2
+    # Un veicolo e un bersaglio stabilmente fermo solo se la maggioranza dei
+    # suoi campioni recenti e sotto la soglia di stop.
+    stationary_history_frames: int = 10
+    stationary_history_ratio: float = 0.75
+    # Una reazione del veicolo in moto deve persistere: elimina frenate o
+    # salti di maschera di un singolo frame durante le svolte all'incrocio.
+    impact_reaction_confirmation_frames: int = 2
+    # Un'anomalia comparsa molto dopo l'inizio di un overlap persistente non
+    # viene attribuita allo stesso contatto (tipico del traffico affiancato).
+    max_contact_candidate_age_frames: int = 5
     collision_confirmation_frames: int = 2
     collision_cooldown_frames: int = 30
     collision_display_frames: int = 15
     pair_state_ttl_frames: int = 45
+    # Una coppia gia in contatto alla prima osservazione e disarmata finche
+    # le sagome non risultano separate per questo numero di frame consecutivi.
+    preexisting_contact_release_frames: int = 3
 
     # Se valorizzato, la pipeline salva diagnostica per coppia ed eventi in
     # JSON Lines, utilizzabile dal modulo src.calibration.

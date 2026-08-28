@@ -251,6 +251,19 @@ class PairDiagnostic:
     dual_stop: bool
     stop_transition: bool
     had_recent_motion: bool
+    preexisting_contact: bool
+    separation_frames: int
+    approach_frames: int
+    sustained_approach: bool
+    stationary_target: bool
+    moving_vehicle_reaction: bool
+    trajectory_deflection: bool
+    crossing_trajectories: bool
+    target_impulse: bool
+    observation_gap_frames: int
+    bridged_dual_stop: bool
+    reaction_frames: int
+    contact_age_frames: int
     candidate_frames: int
     pair_status: str
     emitted: bool

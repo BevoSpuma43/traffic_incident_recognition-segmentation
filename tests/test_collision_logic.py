@@ -34,21 +34,28 @@ def _state(
     acceleration: float = 0.0,
     stopped_frames: int = 0,
     velocity_x: float = 0.0,
+    velocity_y: float = 0.0,
     history_speeds: tuple[float, ...] = (),
+    history_anchors: tuple[tuple[float, float], ...] = (),
 ) -> VehicleState:
     bbox = _bbox(mask)
     anchor = Point2D((bbox[0] + bbox[2]) / 2.0, float(bbox[3]))
     history: deque[TrackSample] = deque(maxlen=15)
     first_frame = frame_index - len(history_speeds) + 1
     for offset, sample_speed in enumerate(history_speeds):
+        sample_anchor = (
+            Point2D(*history_anchors[offset])
+            if offset < len(history_anchors)
+            else anchor
+        )
         history.append(
             TrackSample(
                 frame_index=first_frame + offset,
-                centroid=anchor,
-                motion_anchor=anchor,
+                centroid=sample_anchor,
+                motion_anchor=sample_anchor,
                 speed_px=sample_speed,
                 velocity_x_px=velocity_x,
-                velocity_y_px=0.0,
+                velocity_y_px=velocity_y,
                 acceleration_px=0.0,
                 mask_area=int(np.count_nonzero(mask)),
             )
@@ -60,7 +67,7 @@ def _state(
         centroid=anchor,
         prev_centroid=anchor,
         speed_px=speed,
-        prev_speed_px=max(speed, speed - acceleration),
+        prev_speed_px=max(0.0, speed - acceleration),
         acceleration_px=acceleration,
         polygon=None,
         mask=mask,
@@ -70,7 +77,7 @@ def _state(
         motion_anchor=anchor,
         prev_motion_anchor=anchor,
         velocity_x_px=velocity_x,
-        velocity_y_px=0.0,
+        velocity_y_px=velocity_y,
         kinematics_valid=True,
         observed_frames=max(2, len(history_speeds)),
         confidence=0.9,
@@ -88,9 +95,15 @@ def _detector(**overrides: object) -> CollisionDetector:
         "contact_distance_threshold_px": 2.0,
         "mask_dilation_pixels": 1,
         "min_preimpact_speed_px": 3.0,
+        "motion_confirmation_frames": 1,
+        "approach_confirmation_frames": 1,
+        "approach_evidence_window_frames": 3,
         "impact_window_frames": 3,
+        "impact_reaction_confirmation_frames": 1,
+        "max_contact_candidate_age_frames": 0,
         "collision_confirmation_frames": 2,
         "collision_cooldown_frames": 10,
+        "preexisting_contact_release_frames": 0,
     }
     values.update(overrides)
     return CollisionDetector(**values)
@@ -245,3 +258,646 @@ def test_dynamic_anomaly_and_contact_may_occur_in_neighboring_frames() -> None:
 
     assert before_contact == []
     assert len(at_contact) == 1
+
+
+def test_preexisting_overlap_stays_disarmed_while_queue_is_stationary() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        motion_confirmation_frames=2,
+        preexisting_contact_release_frames=3,
+    )
+    mask_a = _make_mask(2, 2, 9, 9)
+    mask_b = _make_mask(6, 6, 13, 13)
+    events = []
+
+    for frame_index in range(20):
+        events.extend(
+            detector.detect_collisions(
+                [
+                    _state(
+                        60,
+                        mask_a,
+                        frame_index,
+                        speed=0.0,
+                        acceleration=-6.0,
+                        stopped_frames=10,
+                        history_speeds=(4.0, 4.0, 0.0),
+                    ),
+                    _state(
+                        61,
+                        mask_b,
+                        frame_index,
+                        speed=0.0,
+                        stopped_frames=10,
+                        history_speeds=(0.0, 0.0, 0.0),
+                    ),
+                ],
+                frame_index,
+            )
+        )
+
+    assert events == []
+    assert detector.last_diagnostics[0].preexisting_contact is True
+    assert detector.last_diagnostics[0].pair_status == "preexisting_contact"
+
+
+def test_preexisting_overlap_arms_only_after_stable_separation() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        motion_confirmation_frames=2,
+        preexisting_contact_release_frames=3,
+    )
+    mask_a = _make_mask(2, 2, 8, 8)
+    contact_b = _make_mask(2, 6, 8, 12)
+    far_b = _make_mask(2, 12, 8, 18)
+
+    initial = detector.detect_collisions(
+        [
+            _state(70, mask_a, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+            _state(71, contact_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+    separated_events = []
+    for frame_index in range(1, 4):
+        separated_events.extend(
+            detector.detect_collisions(
+                [
+                    _state(70, mask_a, frame_index, speed=5.0, history_speeds=(5.0, 5.0)),
+                    _state(71, far_b, frame_index, speed=0.0, history_speeds=(0.0, 0.0)),
+                ],
+                frame_index,
+            )
+        )
+
+    impact = detector.detect_collisions(
+        [
+            _state(
+                70,
+                mask_a,
+                4,
+                speed=0.0,
+                acceleration=-6.0,
+                velocity_x=5.0,
+                history_speeds=(5.0, 5.0, 0.0),
+            ),
+            _state(71, contact_b, 4, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        4,
+    )
+
+    assert initial == []
+    assert separated_events == []
+    assert len(impact) == 1
+
+
+def test_single_motion_spike_does_not_confirm_preimpact_motion() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        motion_confirmation_frames=2,
+    )
+    mask_a = _make_mask(2, 2, 8, 8)
+    far_b = _make_mask(2, 12, 8, 18)
+    contact_b = _make_mask(2, 6, 8, 12)
+    detector.detect_collisions(
+        [
+            _state(80, mask_a, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+            _state(81, far_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                80,
+                mask_a,
+                1,
+                speed=0.0,
+                acceleration=-6.0,
+                velocity_x=5.0,
+                history_speeds=(0.0, 7.0, 0.0),
+            ),
+            _state(81, contact_b, 1, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        1,
+    )
+
+    assert events == []
+    assert detector.last_diagnostics[0].had_recent_motion is False
+
+
+def test_parallel_slow_traffic_with_overlap_is_not_a_collision() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        motion_confirmation_frames=2,
+        approach_confirmation_frames=3,
+        max_contact_candidate_age_frames=5,
+    )
+    mask_a = _make_mask(2, 2, 9, 9)
+    far_b = _make_mask(2, 12, 9, 19)
+    overlap_b = _make_mask(6, 6, 13, 13)
+    detector.detect_collisions(
+        [
+            _state(90, mask_a, 0, speed=2.0, velocity_x=2.0, history_speeds=(2.0, 2.0)),
+            _state(91, far_b, 0, speed=2.0, velocity_x=2.0, history_speeds=(2.0, 2.0)),
+        ],
+        0,
+    )
+
+    events = []
+    for frame_index in range(1, 9):
+        events.extend(
+            detector.detect_collisions(
+                [
+                    _state(
+                        90,
+                        mask_a,
+                        frame_index,
+                        speed=0.0,
+                        velocity_x=2.0,
+                        history_speeds=(4.0, 4.0, 0.0),
+                    ),
+                    _state(
+                        91,
+                        overlap_b,
+                        frame_index,
+                        speed=0.0,
+                        velocity_x=2.0,
+                        history_speeds=(4.0, 4.0, 0.0),
+                    ),
+                ],
+                frame_index,
+            )
+        )
+
+    assert events == []
+
+
+def test_late_anomaly_during_persistent_contact_is_ignored() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        max_contact_candidate_age_frames=3,
+    )
+    mask_a = _make_mask(2, 2, 8, 8)
+    far_b = _make_mask(2, 12, 8, 18)
+    contact_b = _make_mask(2, 6, 8, 12)
+    detector.detect_collisions(
+        [
+            _state(100, mask_a, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+            _state(101, far_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+    for frame_index in range(1, 7):
+        detector.detect_collisions(
+            [
+                _state(100, mask_a, frame_index, speed=5.0, velocity_x=5.0, history_speeds=(5.0, 5.0)),
+                _state(101, contact_b, frame_index, speed=0.0, history_speeds=(0.0, 0.0)),
+            ],
+            frame_index,
+        )
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                100,
+                mask_a,
+                7,
+                speed=0.0,
+                acceleration=-6.0,
+                velocity_x=5.0,
+                history_speeds=(5.0, 5.0, 0.0),
+            ),
+            _state(101, contact_b, 7, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        7,
+    )
+
+    assert events == []
+    assert detector.last_diagnostics[0].contact_age_frames > 3
+
+
+def test_sustained_convergence_near_contact_can_still_emit() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        motion_confirmation_frames=2,
+        approach_confirmation_frames=3,
+        approach_evidence_window_frames=1,
+        max_contact_candidate_age_frames=5,
+    )
+    mask_a = _make_mask(2, 2, 8, 8)
+    far_b = _make_mask(2, 12, 8, 18)
+    contact_b = _make_mask(2, 6, 8, 12)
+    detector.detect_collisions(
+        [
+            _state(110, mask_a, 0, speed=5.0, velocity_x=5.0, history_speeds=(5.0, 5.0)),
+            _state(111, far_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+
+    events = []
+    for frame_index in range(1, 4):
+        events.extend(
+            detector.detect_collisions(
+                [
+                    _state(
+                        110,
+                        mask_a,
+                        frame_index,
+                        speed=0.0 if frame_index == 3 else 5.0,
+                        acceleration=-6.0 if frame_index == 3 else 0.0,
+                        velocity_x=5.0,
+                        history_speeds=(5.0, 5.0, 0.0),
+                    ),
+                    _state(111, contact_b, frame_index, speed=0.0, history_speeds=(0.0, 0.0)),
+                ],
+                frame_index,
+            )
+        )
+
+    assert len(events) == 1
+
+
+def test_single_frame_braking_during_turn_past_stationary_vehicle_is_ignored() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        impact_reaction_confirmation_frames=2,
+        stationary_history_frames=5,
+        trajectory_history_frames=6,
+        trajectory_reaction_lag_frames=1,
+    )
+    mover_mask = _make_mask(2, 2, 9, 9)
+    target_mask = _make_mask(2, 7, 9, 14)
+    straight_history = tuple((float(x), 8.0) for x in range(6))
+
+    first = detector.detect_collisions(
+        [
+            _state(
+                120,
+                mover_mask,
+                0,
+                speed=5.0,
+                acceleration=-6.0,
+                velocity_x=5.0,
+                history_speeds=(5.0,) * 6,
+                history_anchors=straight_history,
+            ),
+            _state(121, target_mask, 0, speed=0.0, history_speeds=(0.0,) * 6),
+        ],
+        0,
+    )
+    second = detector.detect_collisions(
+        [
+            _state(
+                120,
+                mover_mask,
+                1,
+                speed=5.0,
+                velocity_x=5.0,
+                history_speeds=(5.0,) * 6,
+                history_anchors=straight_history,
+            ),
+            _state(121, target_mask, 1, speed=0.0, history_speeds=(0.0,) * 6),
+        ],
+        1,
+    )
+
+    assert first == []
+    assert second == []
+    assert detector.last_diagnostics[0].reaction_frames == 0
+
+
+def test_late_stationary_target_impact_uses_trajectory_deflection() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        impact_reaction_confirmation_frames=2,
+        stationary_history_frames=5,
+        trajectory_history_frames=6,
+        trajectory_reaction_lag_frames=1,
+        trajectory_min_displacement_px=3.0,
+        trajectory_deflection_angle_deg=45.0,
+        max_contact_candidate_age_frames=2,
+    )
+    mover_mask = _make_mask(2, 2, 9, 9)
+    target_mask = _make_mask(2, 7, 9, 14)
+    straight_history = tuple((float(x), 8.0) for x in range(6))
+
+    events = []
+    for frame_index in range(5):
+        events.extend(
+            detector.detect_collisions(
+                [
+                    _state(
+                        130,
+                        mover_mask,
+                        frame_index,
+                        speed=5.0,
+                        velocity_x=5.0,
+                        history_speeds=(5.0,) * 6,
+                        history_anchors=straight_history,
+                    ),
+                    _state(
+                        131,
+                        target_mask,
+                        frame_index,
+                        speed=0.0,
+                        history_speeds=(0.0,) * 6,
+                    ),
+                ],
+                frame_index,
+            )
+        )
+
+    events.extend(
+        detector.detect_collisions(
+            [
+                _state(
+                    130,
+                    mover_mask,
+                    5,
+                    speed=5.0,
+                    acceleration=-6.0,
+                    velocity_x=5.0,
+                    history_speeds=(5.0,) * 6,
+                    history_anchors=straight_history,
+                ),
+                _state(131, target_mask, 5, speed=0.0, history_speeds=(0.0,) * 6),
+            ],
+            5,
+        )
+    )
+    events.extend(
+        detector.detect_collisions(
+            [
+                _state(
+                    130,
+                    mover_mask,
+                    6,
+                    speed=5.0,
+                    velocity_y=5.0,
+                    history_speeds=(5.0,) * 6,
+                    history_anchors=straight_history,
+                ),
+                _state(131, target_mask, 6, speed=0.0, history_speeds=(0.0,) * 6),
+            ],
+            6,
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].frame_index == 6
+    assert "trajectory_deflection" in events[0].reason
+    assert events[0].first_contact_frame == 0
+
+
+def test_crossing_overlap_without_pair_disruption_is_ignored() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        crossing_history_frames=6,
+        crossing_min_angle_deg=45.0,
+    )
+    vertical = _make_mask(2, 2, 10, 9)
+    horizontal = _make_mask(6, 6, 13, 15)
+    vertical_history = tuple((5.0, float(y)) for y in range(13, 7, -1))
+    horizontal_history = tuple((float(x), 12.0) for x in range(15, 9, -1))
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                140,
+                vertical,
+                0,
+                speed=5.0,
+                velocity_y=-5.0,
+                history_speeds=(5.0,) * 6,
+                history_anchors=vertical_history,
+            ),
+            _state(
+                141,
+                horizontal,
+                0,
+                speed=10.0,
+                acceleration=-6.0,
+                velocity_x=-10.0,
+                history_speeds=(10.0,) * 6,
+                history_anchors=horizontal_history,
+            ),
+        ],
+        0,
+    )
+
+    assert events == []
+    assert detector.last_diagnostics[0].crossing_trajectories is True
+    assert detector.last_diagnostics[0].target_impulse is False
+
+
+def test_crossing_target_impulse_confirms_the_impacted_pair() -> None:
+    detector = _detector(
+        collision_confirmation_frames=2,
+        approach_confirmation_frames=3,
+        crossing_history_frames=6,
+        crossing_min_angle_deg=45.0,
+        target_impulse_acceleration_threshold=8.0,
+    )
+    target = _make_mask(2, 2, 10, 9)
+    mover = _make_mask(6, 6, 13, 15)
+    target_history = ((5.0, 8.0), (5.0, 5.0), (5.0, 20.0))
+    mover_history = tuple((float(x), 12.0) for x in range(15, 9, -1))
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                150,
+                target,
+                0,
+                speed=20.0,
+                acceleration=15.0,
+                velocity_y=20.0,
+                history_speeds=(5.0, 5.0, 20.0),
+                history_anchors=target_history,
+            ),
+            _state(
+                151,
+                mover,
+                0,
+                speed=10.0,
+                velocity_x=-10.0,
+                history_speeds=(10.0,) * 6,
+                history_anchors=mover_history,
+            ),
+        ],
+        0,
+    )
+
+    assert len(events) == 1
+    assert "target_impulse" in events[0].reason
+    assert detector.last_diagnostics[0].crossing_trajectories is True
+    assert detector.last_diagnostics[0].target_impulse is True
+
+
+def test_crossing_dual_stop_after_tracking_gap_is_confirmed() -> None:
+    detector = _detector(
+        collision_confirmation_frames=2,
+        crossing_history_frames=6,
+        crossing_dual_stop_bridge_frames=12,
+        crossing_dual_stop_min_gap_frames=2,
+    )
+    approach_a = _make_mask(1, 3, 7, 8)
+    approach_b = _make_mask(8, 10, 14, 16)
+    contact_a = _make_mask(4, 4, 12, 11)
+    contact_b = _make_mask(7, 8, 15, 15)
+    vertical_history = ((5.0, 3.0), (5.0, 5.0), (5.0, 7.0))
+    horizontal_history = ((16.0, 12.0), (14.0, 12.0), (12.0, 12.0))
+
+    assert detector.detect_collisions(
+        [
+            _state(
+                170,
+                approach_a,
+                0,
+                speed=4.0,
+                velocity_y=4.0,
+                history_speeds=(4.0,) * 3,
+                history_anchors=vertical_history,
+            ),
+            _state(
+                171,
+                approach_b,
+                0,
+                speed=4.0,
+                velocity_x=-4.0,
+                history_speeds=(4.0,) * 3,
+                history_anchors=horizontal_history,
+            ),
+        ],
+        0,
+    ) == []
+
+    for frame_index in range(1, 4):
+        assert detector.detect_collisions([], frame_index) == []
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                170,
+                contact_a,
+                4,
+                speed=0.0,
+                stopped_frames=3,
+                history_speeds=(4.0, 4.0, 0.0),
+            ),
+            _state(
+                171,
+                contact_b,
+                4,
+                speed=0.0,
+                stopped_frames=3,
+                history_speeds=(4.0, 4.0, 0.0),
+            ),
+        ],
+        4,
+    )
+
+    assert len(events) == 1
+    assert "dual_stop" in events[0].reason
+    assert "occlusion_bridge" in events[0].reason
+    assert detector.last_diagnostics[0].observation_gap_frames == 3
+    assert detector.last_diagnostics[0].bridged_dual_stop is True
+
+
+def test_crossing_dual_stop_without_tracking_gap_is_ignored() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        crossing_history_frames=6,
+        crossing_dual_stop_bridge_frames=12,
+        crossing_dual_stop_min_gap_frames=2,
+    )
+    approach_a = _make_mask(1, 3, 7, 8)
+    approach_b = _make_mask(8, 10, 14, 16)
+    contact_a = _make_mask(4, 4, 12, 11)
+    contact_b = _make_mask(7, 8, 15, 15)
+    vertical_history = ((5.0, 3.0), (5.0, 5.0), (5.0, 7.0))
+    horizontal_history = ((16.0, 12.0), (14.0, 12.0), (12.0, 12.0))
+
+    detector.detect_collisions(
+        [
+            _state(
+                180,
+                approach_a,
+                0,
+                speed=4.0,
+                velocity_y=4.0,
+                history_speeds=(4.0,) * 3,
+                history_anchors=vertical_history,
+            ),
+            _state(
+                181,
+                approach_b,
+                0,
+                speed=4.0,
+                velocity_x=-4.0,
+                history_speeds=(4.0,) * 3,
+                history_anchors=horizontal_history,
+            ),
+        ],
+        0,
+    )
+    events = detector.detect_collisions(
+        [
+            _state(
+                180,
+                contact_a,
+                1,
+                speed=0.0,
+                stopped_frames=3,
+                history_speeds=(4.0, 4.0, 0.0),
+            ),
+            _state(
+                181,
+                contact_b,
+                1,
+                speed=0.0,
+                stopped_frames=3,
+                history_speeds=(4.0, 4.0, 0.0),
+            ),
+        ],
+        1,
+    )
+
+    assert events == []
+    assert detector.last_diagnostics[0].observation_gap_frames == 0
+    assert detector.last_diagnostics[0].bridged_dual_stop is False
+
+
+def test_dilated_only_contact_does_not_reuse_stale_dynamic_evidence() -> None:
+    detector = _detector(collision_confirmation_frames=2)
+    mask_a = _make_mask(2, 2, 8, 5)
+    touching_b = _make_mask(2, 5, 8, 8)
+
+    first = detector.detect_collisions(
+        [
+            _state(
+                160,
+                mask_a,
+                0,
+                speed=0.0,
+                acceleration=-6.0,
+                velocity_x=5.0,
+                history_speeds=(5.0, 0.0),
+            ),
+            _state(161, touching_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+    second = detector.detect_collisions(
+        [
+            _state(160, mask_a, 1, speed=3.0, history_speeds=(5.0, 3.0)),
+            _state(161, touching_b, 1, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        1,
+    )
+
+    assert first == []
+    assert second == []

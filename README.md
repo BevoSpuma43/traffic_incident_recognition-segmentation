@@ -117,6 +117,44 @@ Le evidenze possono cadere in frame vicini grazie a una finestra temporale.
 Un candidato deve essere confermato più volte e, dopo l'emissione, la coppia
 entra in cooldown per evitare un evento duplicato a ogni frame.
 
+Una coppia le cui maschere risultano già in contatto alla prima osservazione
+viene marcata come `preexisting_contact`: non può generare eventi finché le
+maschere non restano separate per più frame consecutivi. Questo impedisce alle
+auto già in coda all'inizio del video di essere classificate come incidente a
+causa della prospettiva. Anche il movimento pre-impatto deve persistere per più
+campioni, così un singolo salto della segmentazione non riattiva il candidato.
+
+Nel traffico parallelo lento, anche l'avvicinamento relativo deve essere
+confermato per più frame ed essere temporalmente vicino all'inizio del contatto.
+Se le maschere rimangono sovrapposte a lungo, una variazione cinematica tardiva
+non viene più attribuita retroattivamente a quel contatto. Un overlap forte
+senza convergenza può superare il filtro soltanto insieme a una decelerazione
+brusca.
+
+Per gli urti contro un veicolo stabilmente fermo viene usata una memoria di
+traiettoria separata dalla finestra d'impatto. Lo storico più lungo stima la
+direzione abituale e conserva l'avvicinamento osservato durante un contatto
+prospettico persistente; l'evento richiede però una reazione del veicolo mobile
+su almeno due frame (frenata/arresto o deviazione netta). In questo modo una
+singola frenata apparente durante una svolta non resta valida più a lungo, ma
+una deviazione successiva a un vero impatto può essere riconosciuta.
+
+Quando due traiettorie si incrociano, la sola anomalia del veicolo trasversale
+non viene più riutilizzata per tutte le coppie le cui maschere incontra. Il
+bersaglio deve mostrare una perturbazione locale, come una deviazione oppure
+un'accelerazione positiva improvvisa coerente con un trasferimento di moto.
+Per i contatti dovuti alla sola dilatazione delle maschere, ogni frame di
+conferma richiede inoltre evidenza dinamica o avvicinamento corrente.
+
+Un impatto fronto-laterale può però arrestare entrambi i veicoli senza
+deviazioni visibili e nascondere temporaneamente uno dei track proprio durante
+l'urto. Per questo il rilevatore conserva per 12 frame il solo contesto di
+avvicinamento incrociato. Il contesto può confermare un `dual_stop` soltanto se
+la coppia è mancata per almeno due frame, ricompare con overlap reale e i due
+track risultano fermi in modo persistente. L'arresto simultaneo senza gap di
+tracking resta escluso, così una normale precedenza all'incrocio non sfrutta
+questa eccezione.
+
 ---
 
 ### 9. `src/video_pipeline.py`
@@ -208,9 +246,13 @@ metriche separate per tipo di incidente, rollover, scenario, meteo, fascia
 oraria e qualità. La tolleranza predefinita è di 1 secondo; può essere cambiata con
 `--tolerance-seconds` o `--tolerance-frames`.
 
+Un singolo caso di regressione può essere selezionato con, ad esempio,
+`--video 8G56ILxFFNM_00.mp4`.
+
 Per calibrare le soglie su un sottoinsieme ristretto si può aggiungere
 `--diagnostics`: vengono registrate anche le evidenze di ogni coppia per ogni
-frame. Questa opzione è volutamente disattivata nel benchmark normale perché
+frame e lo stato cinematico di ogni track (bbox, velocità, accelerazione,
+direzione e anzianità). Questa opzione è volutamente disattivata nel benchmark normale perché
 può produrre file molto grandi. Per valutare log già esistenti:
 
 ```powershell

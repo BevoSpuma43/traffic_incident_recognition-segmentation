@@ -1,6 +1,6 @@
 # Stato del progetto e modifiche recenti
 
-Data di aggiornamento: 27 agosto 2026
+Data di aggiornamento: 28 agosto 2026
 Branch di riferimento: `main_v2`
 
 ## 1. Obiettivo del progetto
@@ -28,7 +28,7 @@ metadati.
 Verifiche effettuate:
 
 - compilazione dei moduli `src` e `tests` completata;
-- suite automatica: 39 test superati su 39;
+- suite automatica: 52 test superati su 52;
 - benchmark end-to-end completato su un video reale;
 - 2.027 righe di metadati associate a 2.027 file MP4;
 - nessun path video mancante o duplicato.
@@ -85,6 +85,82 @@ Ogni `CollisionEvent` include track coinvolti, frame di primo contatto e
 conferma, overlap, distanza, velocità relativa, dati cinematici, motivazione e
 un punteggio di confidenza spiegabile.
 
+### 3.4 Protezione dalle code già presenti
+
+Se due track risultano già in contatto quando la coppia viene osservata per la
+prima volta, il contatto viene classificato come preesistente. La coppia resta
+disarmata anche se il jitter delle maschere produce falsi picchi di velocità o
+decelerazione. Il riarmo avviene soltanto dopo una separazione stabile per più
+frame consecutivi; un eventuale ricontatto successivo viene analizzato con le
+regole normali.
+
+Inoltre, il movimento pre-impatto richiede più campioni consecutivi sopra
+soglia. Un singolo salto della segmentazione non è quindi sufficiente a
+dimostrare che un veicolo si stesse realmente muovendo.
+
+### 3.5 Protezione dal traffico parallelo lento
+
+L'avvicinamento relativo deve essere confermato su più frame consecutivi e
+deve restare temporalmente vicino all'inizio dell'episodio di contatto. Una
+coppia che procede affiancata con maschere sovrapposte non può quindi essere
+trasformata in collisione da una variazione di velocità comparsa molti frame
+dopo. L'overlap forte senza convergenza è ammesso soltanto insieme a una forte
+decelerazione.
+
+### 3.6 Memoria di traiettoria per urti contro veicoli fermi
+
+La memoria non è stata aumentata indiscriminatamente. La finestra breve che
+valida overlap, frenate e arresti resta invariata; è stata aggiunta una seconda
+cronologia dedicata alla traiettoria e alla classificazione dei ruoli.
+
+Quando un veicolo si muove verso un bersaglio stabilmente fermo, il sistema:
+
+- conserva l'avvicinamento sostenuto osservato nello stesso episodio;
+- stima la direzione pre-impatto su 12 frame;
+- richiede una reazione del veicolo mobile su almeno due frame consecutivi;
+- riconosce una deviazione di almeno 45 gradi rispetto alla direzione abituale;
+- permette questa evidenza anche dopo un overlap prospettico lungo, senza
+  rendere più longeve le singole anomalie cinematiche.
+
+La reazione del bersaglio fermo non viene più attribuita automaticamente al
+veicolo in movimento. Questo elimina i falsi eventi prodotti da auto che
+svoltano davanti a veicoli fermi e continuano normalmente la marcia.
+
+### 3.7 Attribuzione nelle traiettorie incrociate
+
+Quando un veicolo attraversa orizzontalmente più flussi, la sua frenata non
+può più confermare automaticamente ogni coppia con cui si sovrappone. Due
+traiettorie sono considerate incrociate usando la direzione recente dei track;
+in questo caso viene richiesta anche una perturbazione locale del bersaglio:
+
+- deviazione rispetto alla sua traiettoria precedente; oppure
+- accelerazione positiva improvvisa del veicolo inizialmente più lento,
+  coerente con un trasferimento di moto durante l'urto.
+
+Un contatto prodotto soltanto dalla dilatazione delle maschere non può inoltre
+usare, nel secondo frame di conferma, una vecchia frenata se non esiste più né
+avvicinamento né evidenza dinamica corrente.
+
+### 3.8 Ponte temporale per occlusione durante un dual stop
+
+In un urto tra traiettorie incrociate entrambi i veicoli possono frenare prima
+del contatto, arrestarsi senza deviare e occultarsi a vicenda proprio durante
+l'impatto. La normale finestra breve non viene estesa globalmente: viene
+conservata separatamente, per un massimo di 12 frame, solo l'evidenza di un
+avvicinamento incrociato già confermato.
+
+Il ponte può confermare un evento esclusivamente quando:
+
+- la coppia non è stata osservata per almeno due frame consecutivi;
+- dopo il gap i track ricompaiono con un overlap reale, non solo dilatato;
+- esiste movimento precedente verificato;
+- entrambi risultano fermi in modo persistente secondo la regola `dual_stop`.
+
+Il contesto incrociato resta attivo anche quando le velocità finali sono nulle,
+ma senza un vero gap di tracking il solo arresto simultaneo viene rifiutato.
+Questo limita il rischio di classificare come urto due veicoli che si fermano
+normalmente per concedersi la precedenza.
+
 ## 4. Configurazione attuale
 
 Le soglie principali sono centralizzate in `src/config.py`:
@@ -96,10 +172,27 @@ Le soglie principali sono centralizzate in `src/config.py`:
 | Distanza massima di contatto | 8 px |
 | Dilatazione maschere | 3 px |
 | Velocità minima pre-impatto | 3 px/frame |
+| Conferma del movimento | 3 campioni |
 | Velocità minima di avvicinamento | 1,5 px/frame |
+| Conferma dell'avvicinamento | 3 frame |
+| Validità dell'avvicinamento | 2 frame |
 | Finestra temporale | 5 frame |
+| Memoria della traiettoria | 12 frame |
+| Ritardo escluso dalla direzione di base | 2 frame |
+| Spostamento minimo della traiettoria | 12 px |
+| Deviazione minima | 45 gradi |
+| Memoria per direzioni incrociate | 6 frame |
+| Angolo minimo di incrocio | 45 gradi |
+| Accelerazione minima del bersaglio | 8 px/frame² |
+| Memoria del ponte dual stop incrociato | 12 frame |
+| Gap minimo per il ponte | 2 frame |
+| Memoria per bersaglio fermo | 10 frame |
+| Quota minima di campioni fermi | 0,75 |
+| Conferma della reazione d'impatto | 2 frame |
+| Età massima del contatto candidato | 5 frame |
 | Conferme richieste | 2 frame |
 | Cooldown della coppia | 30 frame |
+| Separazione per riarmo | 3 frame |
 | Filtro EMA della velocità | 0,45 |
 
 Questi valori sono iniziali e devono essere calibrati sul dataset, evitando di
@@ -191,6 +284,89 @@ notte e qualità video molto bassa.
 Il risultato riguarda un solo video e non rappresenta le prestazioni globali
 del progetto.
 
+### Caso di regressione: traffico parallelo
+
+Video: `8G56ILxFFNM_00.mp4`
+
+Prima della correzione il sistema emetteva tre eventi tra i frame 190 e 219,
+mentre i veicoli avanzavano lentamente su file parallele. Dopo l'introduzione
+della convergenza sostenuta e del limite di età del contatto, gli eventi falsi
+sono passati da 3 a 0 sullo stesso video.
+
+Il dataset annota comunque un incidente `sideswipe` al frame 262, che non viene
+ancora rilevato. Il caso rimane quindi utile anche come test di recall: il
+filtro ha corretto i falsi positivi precedenti, ma il riconoscimento dell'evento
+annotato richiede ulteriore lavoro su tracking e dinamica laterale.
+
+### Caso di regressione: veicolo mobile contro veicolo fermo
+
+Video: `95Tx-2p0O_E_00.mp4`
+
+Con le regole precedenti venivano emessi due falsi positivi ai frame 159 e 174
+durante normali svolte all'incrocio, mentre l'urto `rear-end` annotato al frame
+194 non veniva rilevato. La diagnostica ha mostrato che la coppia reale `2-35`
+risultava già in contatto prospettico dal frame 176: il limite di età del
+contatto, corretto per il traffico parallelo, ne impediva la conferma tardiva.
+
+Dopo l'aggiunta della memoria di traiettoria:
+
+| Metrica | Prima | Dopo |
+| --- | ---: | ---: |
+| Veri positivi | 0 | 1 |
+| Falsi positivi | 2 | 0 |
+| Falsi negativi | 1 | 0 |
+| Frame di conferma reale | - | 198 |
+| Ritardo dall'annotazione | - | 4 frame / circa 0,25 s |
+
+Il benchmark di non-regressione su `8G56ILxFFNM_00.mp4` mantiene 0 falsi
+positivi. Il `sideswipe` annotato al frame 262 resta tuttavia non rilevato.
+
+### Caso di regressione: veicolo trasversale su più corsie
+
+Video: `987C4_UdnJE_01.mp4`
+
+Il track `19` attraversa orizzontalmente più veicoli, ma urta fisicamente solo
+il track `20`. Prima della correzione l'algoritmo emetteva cinque eventi e
+riutilizzava la dinamica del track `19` per più coppie prospettiche.
+
+| Metrica | Prima | Dopo |
+| --- | ---: | ---: |
+| Eventi totali | 5 | 1 |
+| Veri positivi | 1 | 1 |
+| Falsi positivi | 4 | 0 |
+| Falsi negativi | 0 | 0 |
+| Coppia attribuita | errata/ambigua | `19-20` |
+| Frame di conferma | 30 | 36 |
+| Scarto dall'annotazione | -9 frame | -3 frame / circa -0,12 s |
+
+I benchmark di non-regressione mantengono `95Tx-2p0O_E_00.mp4` a 1 TP e 0 FP
+e `8G56ILxFFNM_00.mp4` a 0 FP; il `sideswipe` di quest'ultimo resta non
+rilevato.
+
+### Caso di regressione: arresto simultaneo dopo occlusione
+
+Video: `D1eP4Bn4hDQ_0_00.mp4`
+
+Il camion dei pompieri (track `21`) e l'auto (track `22`) frenano prima
+dell'urto, non cambiano traiettoria e infine si arrestano. Il track `21`
+scompare tra i frame 117 e 121 e la coppia ricompare con contatto reale: la
+finestra d'impatto ordinaria perdeva quindi l'avvicinamento incrociato osservato
+fino al frame 116.
+
+| Metrica | Prima | Dopo |
+| --- | ---: | ---: |
+| Veri positivi | 0 | 1 |
+| Falsi positivi | 0 | 0 |
+| Falsi negativi | 1 | 0 |
+| Coppia attribuita | - | `21-22` |
+| Frame di conferma | - | 126 |
+| Ritardo dall'annotazione | - | 5 frame / circa 0,21 s |
+
+L'evento viene spiegato come `stop_transition`, `dual_stop` e
+`occlusion_bridge`. I benchmark di non-regressione restano invariati:
+`987C4_UdnJE_01.mp4` e `95Tx-2p0O_E_00.mp4` mantengono 1 TP e 0 FP;
+`8G56ILxFFNM_00.mp4` mantiene 0 FP e il falso negativo `sideswipe` già noto.
+
 ## 8. Test automatici
 
 La suite comprende test per:
@@ -199,6 +375,16 @@ La suite comprende test per:
 - velocità, accelerazione e filtro EMA;
 - gestione dei track, gap e ID duplicati;
 - conferma temporale, cooldown e rifiuto dei veicoli già fermi;
+- contatto preesistente delle auto in coda e riarmo dopo la separazione;
+- rifiuto dei picchi isolati di movimento dovuti al jitter;
+- traffico lento su file parallele e anomalie tardive durante overlap lunghi;
+- conservazione di un evento con convergenza sostenuta vicino al contatto;
+- rifiuto di una frenata isolata durante una svolta davanti a un veicolo fermo;
+- rilevamento tardivo di un urto tramite deviazione della traiettoria;
+- attribuzione dell'urto tra più traiettorie incrociate;
+- conferma del dual stop incrociato dopo un breve gap di tracking;
+- rifiuto del dual stop incrociato quando il gap di tracking non esiste;
+- rifiuto di un contatto solo dilatato con evidenza dinamica scaduta;
 - caricamento di `metadata-real.csv`;
 - matching per timestamp e frame;
 - aggregazione delle metriche per gruppo;
@@ -210,7 +396,7 @@ Comando verificato:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Risultato corrente: `39 passed`.
+Risultato corrente: `52 passed`.
 
 ## 9. Limiti ancora aperti
 

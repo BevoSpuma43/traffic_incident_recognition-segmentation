@@ -61,16 +61,21 @@ This module embodies the **Business Logic**. The `CollisionDetector` maintains p
 ## Crash Detection Logic
 The detector no longer requires exact mask overlap in one frame. Its current flow is:
 
-1. **Track kinematics:** a bottom-center motion anchor is measured over the actual frame gap and its velocity is filtered with an exponential moving average. New tracks and tracks returning after a long gap do not provide valid impact evidence.
+1. **Track kinematics:** a bottom-center motion anchor is measured over the actual frame gap and its velocity is filtered with an exponential moving average. New tracks and tracks returning after a long gap do not provide valid impact evidence. Pre-impact motion must persist over multiple samples, rejecting isolated segmentation jumps.
 2. **Spatial candidate:** bbox distance is used as an inexpensive pre-filter. Exact overlap is evaluated both in pixels and as `intersection/min(mask areas)`. Slightly dilated masks also detect adjacent silhouettes that touch without sharing pixels.
-3. **Temporal evidence:** contact and a dynamic anomaly may occur within `impact_window_frames`. A stop is accepted only if recent history proves that at least one vehicle was moving.
-4. **Confirmation and cooldown:** evidence must persist for `collision_confirmation_frames`; after confirmation, the pair enters cooldown and cannot emit duplicate events.
+3. **Pre-existing contact guard:** if a pair is already touching when first observed, it is treated as an existing queue/occlusion and remains disarmed until a stable multi-frame separation occurs. A later re-contact can then become a collision candidate.
+4. **Sustained convergence:** relative closing motion must persist across multiple consecutive frames and remain close to the beginning of the contact episode. This rejects adjacent lanes moving slowly in the same direction and prevents a late speed fluctuation from turning a long visual overlap into a crash.
+5. **Role and trajectory memory:** for a moving vehicle approaching a stably stationary target, a separate longer history estimates the pre-impact heading. A late anomaly can override the normal contact-age limit only when the same contact episode contained sustained convergence and the moving vehicle shows a multi-frame reaction, including a significant trajectory deflection. This history does not extend the lifetime of isolated overlap or braking evidence.
+6. **Temporal evidence:** contact and a dynamic anomaly may occur within `impact_window_frames`. A stop is accepted only if recent history proves that at least one vehicle was moving. Strong overlap without confirmed convergence requires hard deceleration.
+7. **Crossing-trajectory attribution:** when one vehicle crosses several traffic streams, its own braking cannot validate every pair it visually overlaps. Crossing pairs require a local disruption of the counterpart, such as trajectory deflection or a strong positive acceleration consistent with transferred momentum. Dilated-only contacts also require current evidence on every confirmation frame.
+8. **Occlusion bridge for crossing dual stops:** a confirmed crossing approach is retained for a short, separate window when one of the tracks disappears at the impact. The bridge can emit only after a gap of at least two pair observations, real mask overlap on reappearance, prior motion, and a persistent stop of both vehicles. A simultaneous stop without a tracking gap is still rejected as normal yielding.
+9. **Confirmation and cooldown:** evidence must persist for `collision_confirmation_frames`; after confirmation, the pair enters cooldown and cannot emit duplicate events. The high-confidence crossing impulse and occlusion-bridge branches already contain multi-frame evidence and can therefore complete confirmation immediately.
 
 `CollisionEvent` records the strongest overlap, relative closing speed, kinematics, first contact frame, confirmation frame, and an explainable confidence score.
 
 ### Calibration and Evaluation
 When `calibration_log_path` is enabled, the pipeline writes JSON Lines records
-for pair-level diagnostics and unique collision events. The `src.calibration`
+for pair-level diagnostics, per-track kinematics, and unique collision events. The `src.calibration`
 module reads `dataset/metadata-real.csv` directly. It records the decoder's
 timestamp for each prediction and compares it with `accident_time`, while
 `accident_frame` remains a parallel metric and a fallback for older logs.
@@ -80,6 +85,30 @@ dataset splits, accident-type filters, resumable execution, throughput and
 real-time-factor measurements, plus breakdowns by accident type and
 environmental metadata. Pair diagnostics are optional during batch runs
 because their size grows with every vehicle pair and frame.
+
+On `95Tx-2p0O_E_00.mp4`, the previous rules emitted two false positives at
+frames 159 and 174 and missed the annotated rear-end collision at frame 194.
+The trajectory-reaction rule suppresses both turning-traffic events and emits
+one event for tracks 2-35 at frame 198 (about 0.25 seconds after the annotation).
+The regression result therefore changed from 0 TP / 2 FP / 1 FN to
+1 TP / 0 FP / 0 FN for this video. This is a single-case result, not a global
+dataset performance claim.
+
+On `987C4_UdnJE_01.mp4`, the previous detector emitted five events while track
+19 crossed several vehicles and did not correctly attribute the physical
+impact. Pair-local crossing evidence now selects tracks 19-20 at frame 36,
+three frames before the frame-39 annotation, and suppresses the four projected
+overlaps plus one later dilated-only false contact. The case changes from
+1 TP / 4 FP to 1 TP / 0 FP; as above, this is a regression-case result only.
+
+On `D1eP4Bn4hDQ_0_00.mp4`, the fire truck and car brake before impact and stop
+without a measurable trajectory change. Track 21 is absent for five frames at
+the collision, so the ordinary short impact window previously lost the
+confirmed crossing approach. The occlusion bridge reconnects that approach to
+the real overlap and persistent dual stop after tracking resumes. It emits for
+tracks 21-22 at frame 126, five frames (about 0.21 seconds) after the frame-121
+annotation, changing this case from 0 TP / 0 FP / 1 FN to 1 TP / 0 FP / 0 FN.
+The three earlier regression videos retain their previous results.
 
 The current real dataset contains 2,027 metadata rows and 2,027 corresponding
 MP4 files, with no missing or duplicate paths. Its accident distribution is

@@ -32,6 +32,7 @@ def test_select_annotations_filters_split_type_and_limit() -> None:
         split_field="split_in_distribution",
         split="test",
         accident_types={"REAR-END"},
+        video_names={"a.mp4"},
         limit=1,
     )
 

@@ -56,6 +56,9 @@ def test_summary_reports_contact_distributions() -> None:
             "detection_count": 2,
             "active_track_count": 2,
         },
+        {"kind": "track", "track_id": 4},
+        {"kind": "track", "track_id": 4},
+        {"kind": "track", "track_id": 9},
         {
             "kind": "diagnostic",
             "contact": True,
@@ -80,6 +83,8 @@ def test_summary_reports_contact_distributions() -> None:
     assert summary["frames_with_detections"] == 1
     assert summary["frames_with_multiple_tracks"] == 1
     assert summary["max_active_tracks"] == 2
+    assert summary["track_rows"] == 3
+    assert summary["unique_track_ids"] == 2
     assert summary["diagnostic_rows"] == 2
     assert summary["contact_rows"] == 2
     assert summary["emitted_rows"] == 1

@@ -142,6 +142,7 @@ class TrafficAccidentPipeline:
                 timestamp_s=timestamp_s,
                 detection_count=len(detections),
                 active_track_count=len(active_states),
+                vehicle_states=active_states,
             )
 
         display_frames = max(
