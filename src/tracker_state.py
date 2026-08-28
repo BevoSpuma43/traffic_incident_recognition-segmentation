@@ -24,6 +24,7 @@ from src.config import AppConfig
 from src.geometry import compute_centroid_from_polygon
 from src.kinematics import (
     compute_acceleration,
+    compute_bbox_scale_px,
     compute_velocity_px,
     exponential_moving_average,
     update_stopped_counter,
@@ -64,6 +65,18 @@ class VehicleStateStore:
         self._max_kinematic_gap = max(
             1, int(getattr(config, "max_kinematic_gap_frames", 2))
         )
+        self._scale_alpha = float(getattr(config, "scale_ema_alpha", 0.25))
+        # Con la normalizzazione attiva anche il contatore di stop deve usare
+        # una soglia proporzionale alla scala: un veicolo lontano non puo
+        # essere dichiarato fermo solo perche si sposta di pochi pixel.
+        self._normalize = bool(
+            getattr(config, "kinematic_normalization_enabled", False)
+        )
+        self._reference_scale_px = max(
+            1e-6, float(getattr(config, "reference_scale_px", 90.0))
+        )
+        self._reference_fps = max(1e-6, float(getattr(config, "reference_fps", 15.0)))
+        self._video_fps = max(0.0, float(getattr(config, "video_fps", 0.0)))
 
     # ------------------------------------------------------------------
     # Interfaccia pubblica
@@ -252,11 +265,15 @@ class VehicleStateStore:
             speed_px = 0.0
             acceleration_px = 0.0
 
+        scale_px = self._smoothed_scale(detection, state.scale_px)
+
         if kinematics_valid and frame_delta == 1:
             stopped_frames = update_stopped_counter(
                 prev_counter=state.stopped_frames,
                 speed_px=speed_px,
-                stopped_speed_threshold=stopped_speed_threshold,
+                stopped_speed_threshold=self._effective_stopped_threshold(
+                    stopped_speed_threshold, scale_px
+                ),
             )
         else:
             stopped_frames = 0
@@ -282,6 +299,7 @@ class VehicleStateStore:
         state.bbox = detection.bbox
         state.last_seen_frame = frame_index
         state.stopped_frames = stopped_frames
+        state.scale_px = scale_px
         state.history.append(self._build_sample(state, frame_index))
 
     def _build_new_state(
@@ -331,10 +349,44 @@ class VehicleStateStore:
             kinematics_valid=False,
             observed_frames=1,
             confidence=detection.confidence,
+            scale_px=compute_bbox_scale_px(detection.bbox),
             history=deque(maxlen=self._history_size),
         )
         state.history.append(self._build_sample(state, frame_index))
         return state
+
+    def _smoothed_scale(
+        self,
+        detection: DetectionResult,
+        previous_scale_px: float,
+    ) -> float:
+        """Filtra la scala apparente per non far oscillare le soglie."""
+        measured = compute_bbox_scale_px(detection.bbox)
+        if measured <= 0.0:
+            return previous_scale_px
+        if previous_scale_px <= 0.0:
+            return measured
+        return exponential_moving_average(
+            previous_scale_px, measured, self._scale_alpha
+        )
+
+    def _effective_stopped_threshold(
+        self,
+        stopped_speed_threshold: float,
+        scale_px: float,
+    ) -> float:
+        """Adegua la soglia di arresto alla scala apparente e al frame rate.
+
+        Una velocita in pixel/frame e proporzionale a ``scala / fps``: senza
+        questa correzione un veicolo lontano risulta sempre fermo e uno vicino
+        non lo risulta mai.
+        """
+        if not self._normalize or scale_px <= 0.0:
+            return stopped_speed_threshold
+        factor = scale_px / self._reference_scale_px
+        if self._video_fps > 0.0:
+            factor *= self._reference_fps / self._video_fps
+        return stopped_speed_threshold * factor
 
     @staticmethod
     def _compute_motion_anchor(
@@ -364,6 +416,7 @@ class VehicleStateStore:
             velocity_y_px=state.velocity_y_px,
             acceleration_px=state.acceleration_px,
             mask_area=mask_area,
+            scale_px=state.scale_px,
         )
 
     def _compute_detection_centroid(self, detection: DetectionResult) -> Point2D:

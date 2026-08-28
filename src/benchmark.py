@@ -70,6 +70,7 @@ def run_video(
     if not capture.isOpened():
         raise RuntimeError(f"Impossibile aprire il video: {video_path}")
 
+    decoder_fps = float(capture.get(cv2.CAP_PROP_FPS))
     config = replace(
         load_default_config(),
         video_path=str(video_path),
@@ -79,11 +80,14 @@ def run_video(
         draw_masks=False,
         draw_ids=False,
         draw_bbox=False,
+        # Il dataset reale va da 3,9 a 49,7 fps: senza questo valore le soglie
+        # cinematiche e le finestre temporali resterebbero espresse nei frame
+        # del video di riferimento invece che in durate confrontabili.
+        video_fps=max(0.0, decoder_fps),
     )
     pipeline: TrafficAccidentPipeline | None = None
     processed_frames = 0
     event_count = 0
-    decoder_fps = float(capture.get(cv2.CAP_PROP_FPS))
     run_started_at = time.perf_counter()
     processing_started_at: float | None = None
     try:

@@ -124,6 +124,13 @@ auto già in coda all'inizio del video di essere classificate come incidente a
 causa della prospettiva. Anche il movimento pre-impatto deve persistere per più
 campioni, così un singolo salto della segmentazione non riattiva il candidato.
 
+Il marchio scatta però solo se entrambi i track sono appena comparsi: una
+coppia nuova fra un track maturo e un ID appena creato nasce quasi sempre da
+una riassegnazione del tracker durante l'occlusione dell'urto, non da due
+veicoli già accostati. Il disarmo scade inoltre dopo un numero massimo di
+frame, così due veicoli che restano a contatto dopo un impatto non restano
+esclusi per il resto del video.
+
 Nel traffico parallelo lento, anche l'avvicinamento relativo deve essere
 confermato per più frame ed essere temporalmente vicino all'inizio del contatto.
 Se le maschere rimangono sovrapposte a lungo, una variazione cinematica tardiva

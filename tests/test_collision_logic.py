@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections import deque
 
 import numpy as np
+import pytest
 
 from src.collision_logic import CollisionDetector
+from src.kinematics import compute_bbox_scale_px
 from src.models import Point2D, TrackSample, VehicleState
 
 
@@ -349,6 +351,213 @@ def test_preexisting_overlap_arms_only_after_stable_separation() -> None:
     assert initial == []
     assert separated_events == []
     assert len(impact) == 1
+
+
+def test_pair_with_one_mature_track_is_not_treated_as_preexisting_contact() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        preexisting_contact_release_frames=3,
+    )
+    mover_mask = _make_mask(2, 2, 9, 9)
+    reborn_mask = _make_mask(6, 6, 13, 13)
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                200,
+                mover_mask,
+                0,
+                speed=0.0,
+                acceleration=-5.0,
+                velocity_x=5.0,
+                history_speeds=(6.0,) * 11 + (0.0,),
+            ),
+            _state(201, reborn_mask, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+
+    assert len(events) == 1
+    assert detector.last_diagnostics[0].preexisting_contact is False
+
+
+def test_pair_of_two_new_tracks_still_arms_preexisting_contact() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        preexisting_contact_release_frames=3,
+    )
+    mask_a = _make_mask(2, 2, 9, 9)
+    mask_b = _make_mask(6, 6, 13, 13)
+
+    events = detector.detect_collisions(
+        [
+            _state(
+                210,
+                mask_a,
+                0,
+                speed=0.0,
+                acceleration=-5.0,
+                velocity_x=5.0,
+                history_speeds=(6.0, 0.0),
+            ),
+            _state(211, mask_b, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        0,
+    )
+
+    assert events == []
+    assert detector.last_diagnostics[0].preexisting_contact is True
+
+
+def test_preexisting_contact_is_released_after_the_timeout() -> None:
+    detector = _detector(
+        collision_confirmation_frames=1,
+        preexisting_contact_release_frames=3,
+        preexisting_contact_max_frames=5,
+    )
+    mask_a = _make_mask(2, 2, 9, 9)
+    mask_b = _make_mask(6, 6, 13, 13)
+
+    # La coppia nasce gia a contatto e non si separa mai: senza scadenza
+    # resterebbe disarmata per tutta la durata del video.
+    disarmed_events = []
+    for frame_index in range(5):
+        disarmed_events.extend(
+            detector.detect_collisions(
+                [
+                    _state(
+                        220,
+                        mask_a,
+                        frame_index,
+                        speed=0.0,
+                        stopped_frames=6,
+                        history_speeds=(0.0, 0.0),
+                    ),
+                    _state(
+                        221,
+                        mask_b,
+                        frame_index,
+                        speed=0.0,
+                        stopped_frames=6,
+                        history_speeds=(0.0, 0.0),
+                    ),
+                ],
+                frame_index,
+            )
+        )
+        if frame_index == 3:
+            assert detector.last_diagnostics[0].preexisting_contact is True
+
+    assert disarmed_events == []
+    assert detector.last_diagnostics[0].preexisting_contact is False
+
+    impact = detector.detect_collisions(
+        [
+            _state(
+                220,
+                mask_a,
+                5,
+                speed=0.0,
+                acceleration=-5.0,
+                velocity_x=5.0,
+                history_speeds=(6.0, 0.0),
+            ),
+            _state(221, mask_b, 5, speed=0.0, history_speeds=(0.0, 0.0)),
+        ],
+        5,
+    )
+
+    assert len(impact) == 1
+
+
+def test_normalization_is_inert_at_reference_scale_and_fps() -> None:
+    """A condizioni di riferimento le soglie devono restare identiche."""
+    mask = _make_mask(2, 2, 9, 9)
+    bbox = _bbox(mask)
+    reference_scale = ((bbox[2] - bbox[0]) ** 2 + (bbox[3] - bbox[1]) ** 2) ** 0.5
+
+    plain = _detector(collision_confirmation_frames=1)
+    normalized = _detector(
+        collision_confirmation_frames=1,
+        kinematic_normalization_enabled=True,
+        reference_scale_px=reference_scale,
+        reference_fps=25.0,
+        video_fps=25.0,
+    )
+
+    assert normalized._window(6) == 6
+    assert normalized._speed_threshold(3.0, _state(1, mask, 0, speed=0.0)) == 3.0
+
+    other = _make_mask(6, 6, 13, 13)
+    states = lambda: [
+        _state(1, mask, 0, speed=0.0, acceleration=-5.0, history_speeds=(6.0, 0.0)),
+        _state(2, other, 0, speed=0.0, history_speeds=(0.0, 0.0)),
+    ]
+    assert len(plain.detect_collisions(states(), 0)) == len(
+        normalized.detect_collisions(states(), 0)
+    )
+
+
+def test_distant_vehicle_keeps_a_proportionally_lower_speed_threshold() -> None:
+    """Un veicolo lontano si muove di pochi pixel: la soglia deve scendere."""
+    detector = _detector(
+        kinematic_normalization_enabled=True,
+        reference_scale_px=90.0,
+        reference_fps=15.0,
+        video_fps=15.0,
+    )
+    near = _state(1, _make_mask(0, 0, 19, 19), 0, speed=0.0)
+    far = _state(2, _make_mask(8, 8, 11, 11), 0, speed=0.0)
+
+    near_threshold = detector._speed_threshold(3.0, near)
+    far_threshold = detector._speed_threshold(3.0, far)
+
+    assert far_threshold < near_threshold
+    # Il rapporto fra le soglie segue il rapporto fra le diagonali delle bbox.
+    assert far_threshold / near_threshold == pytest.approx(
+        compute_bbox_scale_px(far.bbox) / compute_bbox_scale_px(near.bbox)
+    )
+
+
+def test_higher_frame_rate_lowers_speeds_and_stretches_windows() -> None:
+    """A fps doppio lo stesso moto fisico produce meta pixel per frame."""
+    detector = _detector(
+        kinematic_normalization_enabled=True,
+        normalize_time_windows=True,
+        reference_scale_px=10.0,
+        reference_fps=15.0,
+        video_fps=30.0,
+    )
+    vehicle = _state(1, _make_mask(2, 2, 9, 9), 0, speed=0.0)
+
+    # Le soglie di velocita si dimezzano, quelle di accelerazione si riducono
+    # di un fattore quattro, le finestre in frame raddoppiano.
+    assert detector._speed_threshold(3.0, vehicle) == pytest.approx(
+        1.5 * detector._vehicle_scale_factor(vehicle)
+    )
+    assert detector._acceleration_threshold(-4.0, vehicle) == pytest.approx(
+        -1.0 * detector._vehicle_scale_factor(vehicle)
+    )
+    assert detector._window(5) == 10
+    assert detector._window(3) == 6
+    # Lo zero conserva il significato di "controllo disattivato".
+    assert detector._window(0) == 0
+
+
+def test_time_windows_are_not_dilated_unless_explicitly_enabled() -> None:
+    """Le magnitudini si normalizzano, le finestre no: default misurato."""
+    detector = _detector(
+        kinematic_normalization_enabled=True,
+        reference_scale_px=10.0,
+        reference_fps=15.0,
+        video_fps=30.0,
+    )
+    vehicle = _state(1, _make_mask(2, 2, 9, 9), 0, speed=0.0)
+
+    assert detector._window(5) == 5
+    assert detector._window(3) == 3
+    # La normalizzazione delle magnitudini resta comunque attiva.
+    assert detector._speed_threshold(3.0, vehicle) < 3.0
 
 
 def test_single_motion_spike_does_not_confirm_preimpact_motion() -> None:

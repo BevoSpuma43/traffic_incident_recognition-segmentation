@@ -65,6 +65,29 @@ def exponential_moving_average(previous: float, current: float, alpha: float) ->
     return weight * float(current) + (1.0 - weight) * float(previous)
 
 
+def compute_bbox_scale_px(bbox: Sequence[float] | None) -> float:
+    """Scala apparente di un veicolo: diagonale del bounding box in pixel.
+
+    La diagonale e un proxy del rapporto pixel/metro nel punto della scena
+    occupato dal veicolo: a parita di velocita reale, un veicolo lontano si
+    sposta di pochi pixel per frame e uno vicino di molti. Normalizzare le
+    soglie su questa grandezza le rende indipendenti dalla prospettiva.
+
+    Si preferisce la diagonale all'altezza o all'area della maschera perche e
+    meno sensibile sia all'orientamento del veicolo sia alle occlusioni
+    parziali della segmentazione.
+
+    Returns
+    -------
+    float
+        Diagonale in pixel, oppure 0.0 se la bbox manca o e degenere.
+    """
+    if bbox is None or len(bbox) < 4:
+        return 0.0
+    x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+    return math.hypot(x2 - x1, y2 - y1)
+
+
 def compute_speed_px(
     prev_centroid: _HasXY | Sequence[float] | None,
     curr_centroid: _HasXY | Sequence[float] | None,

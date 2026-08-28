@@ -261,6 +261,13 @@ class TrafficApp(ctk.CTk):
                 final_status = "impossibile aprire il video"
                 return
 
+            # Il frame rate reale serve al rilevatore per convertire le soglie
+            # cinematiche, che sono tarate su un frame rate di riferimento.
+            config = replace(
+                config,
+                video_fps=max(0.0, float(cap.get(cv2.CAP_PROP_FPS))),
+            )
+
             # Inizializzazione della pipeline (carica YOLO, ByteTrack, detector).
             pipeline = TrafficAccidentPipeline(config)
             cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)

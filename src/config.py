@@ -84,6 +84,48 @@ class AppConfig:
     # una variazione negativa della velocità (frenata improvvisa).
     strong_deceleration_threshold: float = -4.0
 
+    # ------------------------------------------------------------------
+    # Normalizzazione cinematica (scala apparente e frame rate)
+    # ------------------------------------------------------------------
+    # Tutte le soglie cinematiche sotto sono espresse in pixel/frame e restano
+    # tarate su un veicolo di scala `reference_scale_px` in un video a
+    # `reference_fps`. Con la normalizzazione attiva vengono riscalate a ogni
+    # confronto sulla scala apparente del veicolo e sul frame rate reale:
+    #   - una velocita in px/frame e proporzionale a  scala / fps
+    #   - un'accelerazione in px/frame^2 e proporzionale a  scala / fps^2
+    #   - una distanza in px e proporzionale a  scala
+    #   - un'area in px^2 e proporzionale a  scala^2
+    # Disattivando il flag il rilevatore torna esattamente al comportamento
+    # precedente, utile per confrontare le due configurazioni sullo stesso log.
+    #
+    # DEFAULT OFF, e la ragione va letta prima di cambiarlo. Sul campione di 50
+    # video la normalizzazione completa (magnitudini + finestre) e risultata una
+    # regressione: 1 -> 0 veri positivi e 3 -> 5 falsi positivi. Le coppie che
+    # collidono hanno scala apparente sopra la mediana del dataset (128 px
+    # contro 90), quindi normalizzare gli ALZA le soglie invece di abbassarle.
+    # La configurazione con le sole magnitudini non e ancora stata misurata:
+    # attivarla solo dopo aver rieseguito il benchmark. Vedi
+    # CRASH_DETECTION_PLAN.md, punto 2.
+    kinematic_normalization_enabled: bool = False
+    # La dilatazione delle finestre e corretta in teoria - una durata e una
+    # durata - ma e la meta piu dannosa della normalizzazione: a 30 fps
+    # raddoppia i frame di conferma richiesti, e i track coinvolti in un urto
+    # vivono spesso pochi frame perche il tracker riassegna gli ID durante
+    # l'occlusione. Resta separata dalle magnitudini per poterle misurare
+    # indipendentemente.
+    normalize_time_windows: bool = False
+    # Mediana della diagonale delle bbox misurata sul dataset reale (90,7 px).
+    reference_scale_px: float = 90.0
+    # Mediana del frame rate del dataset reale (14,99 fps).
+    reference_fps: float = 15.0
+    # Frame rate del video in analisi. 0 significa sconosciuto: in quel caso
+    # non viene applicata alcuna correzione temporale. La CLI e il benchmark lo
+    # valorizzano con il valore restituito dal decoder.
+    video_fps: float = 0.0
+    # La scala apparente e filtrata piu della velocita: cambia lentamente e un
+    # salto della maschera non deve alterare le soglie di un intero frame.
+    scale_ema_alpha: float = 0.25
+
     # Parametri temporali e spaziali del rilevatore di collisioni.
     motion_history_size: int = 15
     velocity_ema_alpha: float = 0.45
@@ -135,6 +177,18 @@ class AppConfig:
     # Una coppia gia in contatto alla prima osservazione e disarmata finche
     # le sagome non risultano separate per questo numero di frame consecutivi.
     preexisting_contact_release_frames: int = 3
+    # Il contatto e davvero preesistente solo se nessuno dei due track era gia
+    # noto: una coppia nuova fra un track maturo e un ID appena creato nasce
+    # quasi sempre da una riassegnazione del tracker durante l'occlusione
+    # dell'urto, non da due veicoli gia accostati. Un track e considerato nuovo
+    # finche non supera questo numero di frame osservati; con 0 nessun track e
+    # nuovo e il disarmo non scatta mai.
+    preexisting_contact_max_track_age_frames: int = 10
+    # Il disarmo non e permanente: dopo questo numero di frame consecutivi la
+    # coppia torna alle regole normali anche se le sagome non si sono mai
+    # separate. Senza questo limite due veicoli che restano a contatto dopo un
+    # urto non possono piu generare alcun evento. Con 0 il limite e disattivato.
+    preexisting_contact_max_frames: int = 45
 
     # Se valorizzato, la pipeline salva diagnostica per coppia ed eventi in
     # JSON Lines, utilizzabile dal modulo src.calibration.

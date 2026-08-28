@@ -54,6 +54,9 @@ class TrackSample:
     velocity_y_px: float
     acceleration_px: float
     mask_area: int
+    # Scala apparente del veicolo (diagonale della bbox, filtrata): serve a
+    # rendere le soglie cinematiche indipendenti dalla distanza dalla camera.
+    scale_px: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,10 @@ class VehicleState:
     kinematics_valid: bool = False
     observed_frames: int = 1
     confidence: float = 0.0
+    # Diagonale della bbox filtrata con EMA: proxy della scala apparente e
+    # quindi del rapporto pixel/metro nel punto della scena occupato dal
+    # veicolo. Usata da collision_logic per normalizzare le soglie.
+    scale_px: float = 0.0
     history: deque[TrackSample] = field(default_factory=deque)
 
 

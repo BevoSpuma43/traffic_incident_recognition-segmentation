@@ -85,6 +85,9 @@ def main() -> None:
 
     frame_index: int = 0
     video_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    # Il rilevatore normalizza le soglie cinematiche sul frame rate reale:
+    # senza questo valore resterebbero tarate sul frame rate di riferimento.
+    config = replace(config, video_fps=max(0.0, video_fps))
     pipeline: TrafficAccidentPipeline | None = None
 
     try:

@@ -12,6 +12,7 @@ from src.geometry import (
     mask_intersection_area_in_roi,
     normalized_overlap,
 )
+from src.kinematics import compute_bbox_scale_px
 from src.models import CollisionEvent, PairDiagnostic, VehicleState
 
 
@@ -53,6 +54,7 @@ class _PairState:
     max_closing_speed_px: float = 0.0
     preexisting_contact: bool = False
     separation_frames: int = 0
+    preexisting_frames: int = 0
 
     def reset_candidate(self, *, keep_temporal: bool = False) -> None:
         previous_approach = self.last_approach_frame
@@ -146,6 +148,13 @@ class CollisionDetector:
         collision_cooldown_frames: int = 30,
         pair_state_ttl_frames: int = 45,
         preexisting_contact_release_frames: int = 3,
+        preexisting_contact_max_track_age_frames: int = 10,
+        preexisting_contact_max_frames: int = 45,
+        kinematic_normalization_enabled: bool = False,
+        normalize_time_windows: bool = False,
+        reference_scale_px: float = 90.0,
+        reference_fps: float = 15.0,
+        video_fps: float = 0.0,
     ) -> None:
         self.mask_overlap_threshold = max(0, int(mask_overlap_threshold))
         self.stopped_frames_threshold = max(1, int(stopped_frames_threshold))
@@ -203,6 +212,27 @@ class CollisionDetector:
         self.preexisting_contact_release_frames = max(
             0, int(preexisting_contact_release_frames)
         )
+        self.preexisting_contact_max_track_age_frames = max(
+            0, int(preexisting_contact_max_track_age_frames)
+        )
+        self.preexisting_contact_max_frames = max(
+            0, int(preexisting_contact_max_frames)
+        )
+        self.kinematic_normalization_enabled = bool(
+            kinematic_normalization_enabled
+        )
+        self.normalize_time_windows = bool(normalize_time_windows)
+        self.reference_scale_px = max(1e-6, float(reference_scale_px))
+        self.reference_fps = max(1e-6, float(reference_fps))
+        self.video_fps = max(0.0, float(video_fps))
+        # Converte una soglia per-frame tarata a `reference_fps` verso il frame
+        # rate reale: a fps piu alto lo stesso moto fisico produce meno pixel
+        # per frame, quindi le soglie di velocita devono scendere e le finestre
+        # espresse in frame devono allungarsi. Calcolato una volta sola perche
+        # viene usato in ogni confronto di ogni coppia di ogni frame.
+        self._time_factor = 1.0
+        if self.kinematic_normalization_enabled and self.video_fps > 0.0:
+            self._time_factor = self.reference_fps / self.video_fps
         self._pair_states: dict[tuple[int, int], _PairState] = {}
         self.last_diagnostics: list[PairDiagnostic] = []
 
@@ -259,6 +289,19 @@ class CollisionDetector:
             preexisting_contact_release_frames=(
                 config.preexisting_contact_release_frames
             ),
+            preexisting_contact_max_track_age_frames=(
+                config.preexisting_contact_max_track_age_frames
+            ),
+            preexisting_contact_max_frames=(
+                config.preexisting_contact_max_frames
+            ),
+            kinematic_normalization_enabled=(
+                config.kinematic_normalization_enabled
+            ),
+            normalize_time_windows=config.normalize_time_windows,
+            reference_scale_px=config.reference_scale_px,
+            reference_fps=config.reference_fps,
+            video_fps=config.video_fps,
         )
 
     def detect_collisions(
@@ -367,22 +410,22 @@ class CollisionDetector:
                     is_new_pair
                     and spatial.contact
                     and self.preexisting_contact_release_frames > 0
+                    and self._both_tracks_are_new(vehicle_a, vehicle_b)
                 ):
                     pair_state.preexisting_contact = True
                     pair_state.status = "preexisting_contact"
 
                 if pair_state.preexisting_contact:
+                    pair_state.preexisting_frames += 1
                     if spatial.contact:
                         pair_state.separation_frames = 0
                     else:
                         pair_state.separation_frames += 1
-                        if (
-                            pair_state.separation_frames
-                            >= self.preexisting_contact_release_frames
-                        ):
-                            pair_state.preexisting_contact = False
-                            pair_state.separation_frames = 0
-                            pair_state.reset_candidate()
+                    if self._preexisting_contact_is_released(pair_state):
+                        pair_state.preexisting_contact = False
+                        pair_state.separation_frames = 0
+                        pair_state.preexisting_frames = 0
+                        pair_state.reset_candidate()
 
                     self._record_diagnostic(
                         frame_index=frame_index,
@@ -419,14 +462,15 @@ class CollisionDetector:
                         pair_state.min_distance_px, spatial.distance_px
                     )
 
-                if closing_speed >= self.min_closing_speed_px:
+                if closing_speed >= self._pair_speed_threshold(
+                    self.min_closing_speed_px, vehicle_a, vehicle_b
+                ):
                     pair_state.approach_frames += 1
                     pair_state.max_closing_speed_px = max(
                         pair_state.max_closing_speed_px, closing_speed
                     )
-                    if (
-                        pair_state.approach_frames
-                        >= self.approach_confirmation_frames
+                    if pair_state.approach_frames >= self._window(
+                        self.approach_confirmation_frames
                     ):
                         pair_state.last_approach_frame = frame_index
                         pair_state.sustained_approach = True
@@ -463,22 +507,25 @@ class CollisionDetector:
                 strong_overlap = pair_state.max_overlap_ratio >= max(
                     0.05, self.mask_overlap_ratio_threshold * 2.0
                 )
+                bridge_frames = self._window(self.crossing_dual_stop_bridge_frames)
+                min_gap_frames = self._window(self.crossing_dual_stop_min_gap_frames)
                 recent_observation_gap = (
                     pair_state.last_observation_gap_frame is not None
                     and 0
                     <= frame_index - pair_state.last_observation_gap_frame
-                    <= self.crossing_dual_stop_bridge_frames
-                    and pair_state.observation_gap_frames
-                    >= self.crossing_dual_stop_min_gap_frames
+                    <= bridge_frames
+                    and pair_state.observation_gap_frames >= min_gap_frames
                 )
                 contact_age = self._contact_age(pair_state, frame_index)
+                max_contact_age = self._window(
+                    self.max_contact_candidate_age_frames
+                )
                 fresh_contact = (
-                    self.max_contact_candidate_age_frames == 0
-                    or contact_age <= self.max_contact_candidate_age_frames
+                    max_contact_age == 0 or contact_age <= max_contact_age
                 )
                 confirmed_moving_reaction = (
                     pair_state.reaction_frames
-                    >= self.impact_reaction_confirmation_frames
+                    >= self._window(self.impact_reaction_confirmation_frames)
                 )
                 late_stationary_impact = (
                     stationary_role is not None
@@ -508,11 +555,10 @@ class CollisionDetector:
                     and pair_state.last_observation_gap_frame is not None
                     and pair_state.last_observation_gap_frame
                     > pair_state.last_crossing_approach_frame
-                    and pair_state.observation_gap_frames
-                    >= self.crossing_dual_stop_min_gap_frames
+                    and pair_state.observation_gap_frames >= min_gap_frames
                     and 0
                     <= frame_index - pair_state.last_observation_gap_frame
-                    <= self.crossing_dual_stop_bridge_frames
+                    <= bridge_frames
                 )
                 bridged_strong_impact = (
                     spatial.contact
@@ -532,18 +578,27 @@ class CollisionDetector:
                     or bridged_dual_stop
                     or bridged_strong_impact
                 )
+                closing_speed_threshold = self._pair_speed_threshold(
+                    self.min_closing_speed_px, vehicle_a, vehicle_b
+                )
                 high_confidence_crossing_impulse = (
                     crossing_trajectories
                     and target_impulse
                     and spatial.contact
-                    and spatial.overlap_area >= self.mask_overlap_threshold
-                    and closing_speed >= self.min_closing_speed_px
+                    and spatial.overlap_area
+                    >= self._area_threshold(
+                        self.mask_overlap_threshold, vehicle_a, vehicle_b
+                    )
+                    and closing_speed >= closing_speed_threshold
                 )
                 weak_contact_without_current_evidence = (
                     spatial.contact
                     and spatial.overlap_area == 0
                     and not dynamic_evidence
-                    and closing_speed < self.min_closing_speed_px
+                    and closing_speed < closing_speed_threshold
+                )
+                confirmation_frames = self._window(
+                    self.collision_confirmation_frames
                 )
                 emitted = False
                 if (
@@ -573,7 +628,7 @@ class CollisionDetector:
                         bridged_dual_stop or bridged_strong_impact
                     )
                     pair_state.candidate_frames += (
-                        self.collision_confirmation_frames
+                        confirmation_frames
                         if (
                             high_confidence_crossing_impulse
                             or bridged_dual_stop
@@ -586,10 +641,7 @@ class CollisionDetector:
                 else:
                     pair_state.candidate_frames = 0
 
-                if (
-                    pair_state.candidate_frames
-                    >= self.collision_confirmation_frames
-                ):
+                if pair_state.candidate_frames >= confirmation_frames:
                     ordered_a, ordered_b = self._ordered_states(vehicle_a, vehicle_b)
                     collisions.append(
                         self._build_event(
@@ -598,8 +650,8 @@ class CollisionDetector:
                     )
                     emitted = True
                     pair_state.status = "cooldown"
-                    pair_state.cooldown_until = (
-                        frame_index + self.collision_cooldown_frames
+                    pair_state.cooldown_until = frame_index + self._window(
+                        self.collision_cooldown_frames
                     )
                     pair_state.candidate_frames = 0
 
@@ -638,13 +690,141 @@ class CollisionDetector:
             return vehicle_a, vehicle_b
         return vehicle_b, vehicle_a
 
+    # ------------------------------------------------------------------
+    # Normalizzazione delle soglie
+    #
+    # Le soglie di configurazione sono tarate su un veicolo di scala
+    # `reference_scale_px` in un video a `reference_fps`. Qui vengono convertite
+    # nelle unita effettive del veicolo e del video in esame. A condizioni di
+    # riferimento tutti i fattori valgono 1 e i valori restano identici.
+    # ------------------------------------------------------------------
+
+    def _vehicle_scale_factor(self, vehicle: VehicleState) -> float:
+        """Rapporto fra la scala apparente del veicolo e quella di riferimento."""
+        if not self.kinematic_normalization_enabled:
+            return 1.0
+        scale = vehicle.scale_px
+        if scale <= 0.0:
+            scale = compute_bbox_scale_px(vehicle.bbox)
+        if scale <= 0.0:
+            return 1.0
+        return scale / self.reference_scale_px
+
+    def _pair_scale_factor(
+        self,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> float:
+        """Scala di riferimento della coppia: media delle due scale.
+
+        La media e simmetrica rispetto all'ordine dei track, a differenza di
+        min/max, e non fa dipendere l'esito dal veicolo che si e segmentato
+        peggio in quel frame.
+        """
+        if not self.kinematic_normalization_enabled:
+            return 1.0
+        return (
+            self._vehicle_scale_factor(vehicle_a)
+            + self._vehicle_scale_factor(vehicle_b)
+        ) / 2.0
+
+    def _speed_threshold(self, base: float, vehicle: VehicleState) -> float:
+        """Soglia di velocita: px/frame e proporzionale a scala / fps."""
+        return base * self._vehicle_scale_factor(vehicle) * self._time_factor
+
+    def _pair_speed_threshold(
+        self,
+        base: float,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> float:
+        return (
+            base * self._pair_scale_factor(vehicle_a, vehicle_b) * self._time_factor
+        )
+
+    def _acceleration_threshold(self, base: float, vehicle: VehicleState) -> float:
+        """Soglia di accelerazione: px/frame^2 e proporzionale a scala / fps^2."""
+        return (
+            base
+            * self._vehicle_scale_factor(vehicle)
+            * self._time_factor
+            * self._time_factor
+        )
+
+    def _distance_threshold(
+        self,
+        base: float,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState | None = None,
+    ) -> float:
+        """Soglia di lunghezza: i pixel scalano con la scala, non con gli fps."""
+        if vehicle_b is None:
+            return base * self._vehicle_scale_factor(vehicle_a)
+        return base * self._pair_scale_factor(vehicle_a, vehicle_b)
+
+    def _area_threshold(
+        self,
+        base: float,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> float:
+        """Soglia di area: i pixel quadrati scalano con il quadrato della scala."""
+        factor = self._pair_scale_factor(vehicle_a, vehicle_b)
+        return base * factor * factor
+
+    def _window(self, frames: int) -> int:
+        """Converte una finestra tarata a `reference_fps` nel frame rate reale.
+
+        Uno zero conserva il proprio significato di "controllo disattivato" e
+        non viene mai trasformato in un frame.
+
+        La conversione e disattivata di default: misurata sul dataset reale
+        peggiora il rilevamento, perche moltiplica i frame di conferma richiesti
+        proprio alle coppie che ne hanno meno a disposizione.
+        """
+        if frames <= 0 or not self.normalize_time_windows:
+            return int(frames)
+        if self._time_factor == 1.0:
+            return int(frames)
+        return max(1, int(round(frames / self._time_factor)))
+
+    def _both_tracks_are_new(
+        self,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> bool:
+        """Vero solo se nessuno dei due track era gia noto da diversi frame.
+
+        Una coppia nuova fra un track maturo e un ID appena creato non prova
+        che i veicoli fossero gia accostati: nella maggior parte dei casi il
+        tracker ha semplicemente riassegnato un ID mentre le sagome si
+        occludevano, cioe proprio durante l'urto. Solo quando entrambi i track
+        sono appena comparsi l'avvicinamento e realmente non osservabile.
+        """
+        limit = self._window(self.preexisting_contact_max_track_age_frames)
+        return (
+            vehicle_a.observed_frames <= limit
+            and vehicle_b.observed_frames <= limit
+        )
+
+    def _preexisting_contact_is_released(self, pair_state: _PairState) -> bool:
+        """Rilascia il disarmo per separazione stabile oppure per scadenza."""
+        if pair_state.separation_frames >= self._window(
+            self.preexisting_contact_release_frames
+        ):
+            return True
+        expiry = self._window(self.preexisting_contact_max_frames)
+        return expiry > 0 and pair_state.preexisting_frames >= expiry
+
     def _spatial_evidence(
         self,
         vehicle_a: VehicleState,
         vehicle_b: VehicleState,
     ) -> _SpatialEvidence:
         distance = bbox_distance(vehicle_a.bbox, vehicle_b.bbox)
-        if distance > self.contact_distance_threshold_px:
+        if distance > self._distance_threshold(
+            self.contact_distance_threshold_px, vehicle_a, vehicle_b
+        ):
             return _SpatialEvidence(False, 0, 0.0, distance)
 
         overlap_area = mask_intersection_area_in_roi(
@@ -660,7 +840,10 @@ class CollisionDetector:
             self._current_mask_area(vehicle_b),
         )
         meaningful_overlap = overlap_area > 0 and (
-            overlap_area >= self.mask_overlap_threshold
+            overlap_area
+            >= self._area_threshold(
+                self.mask_overlap_threshold, vehicle_a, vehicle_b
+            )
             or overlap_ratio >= self.mask_overlap_ratio_threshold
         )
         near_contact = dilated_masks_touch_in_roi(
@@ -704,13 +887,16 @@ class CollisionDetector:
         return max(0.0, -distance_rate)
 
     def _both_stopped(self, vehicle_a: VehicleState, vehicle_b: VehicleState) -> bool:
+        stopped_frames = self._window(self.stopped_frames_threshold)
         return (
             vehicle_a.kinematics_valid
             and vehicle_b.kinematics_valid
-            and vehicle_a.stopped_frames >= self.stopped_frames_threshold
-            and vehicle_b.stopped_frames >= self.stopped_frames_threshold
-            and vehicle_a.speed_px <= self.stopped_speed_threshold
-            and vehicle_b.speed_px <= self.stopped_speed_threshold
+            and vehicle_a.stopped_frames >= stopped_frames
+            and vehicle_b.stopped_frames >= stopped_frames
+            and vehicle_a.speed_px
+            <= self._speed_threshold(self.stopped_speed_threshold, vehicle_a)
+            and vehicle_b.speed_px
+            <= self._speed_threshold(self.stopped_speed_threshold, vehicle_b)
         )
 
     def _hard_deceleration(
@@ -723,9 +909,11 @@ class CollisionDetector:
         ) or self._vehicle_hard_deceleration(vehicle_b)
 
     def _vehicle_hard_deceleration(self, vehicle: VehicleState) -> bool:
-        return (
-            vehicle.kinematics_valid
-            and vehicle.acceleration_px <= self.strong_deceleration_threshold
+        return vehicle.kinematics_valid and (
+            vehicle.acceleration_px
+            <= self._acceleration_threshold(
+                self.strong_deceleration_threshold, vehicle
+            )
         )
 
     def _stationary_target_and_mover(
@@ -750,16 +938,18 @@ class CollisionDetector:
         vehicle: VehicleState,
         frame_index: int,
     ) -> bool:
+        history_frames = self._window(self.stationary_history_frames)
         samples = [
             sample
             for sample in vehicle.history
-            if 0 <= frame_index - sample.frame_index < self.stationary_history_frames
+            if 0 <= frame_index - sample.frame_index < history_frames
         ]
-        minimum_samples = max(3, int(math.ceil(self.stationary_history_frames * 0.6)))
+        minimum_samples = max(3, int(math.ceil(history_frames * 0.6)))
         if len(samples) < minimum_samples:
             return False
+        stopped_speed = self._speed_threshold(self.stopped_speed_threshold, vehicle)
         stationary_samples = sum(
-            sample.speed_px <= self.stopped_speed_threshold for sample in samples
+            sample.speed_px <= stopped_speed for sample in samples
         )
         return stationary_samples / len(samples) >= self.stationary_history_ratio
 
@@ -772,17 +962,15 @@ class CollisionDetector:
         if not vehicle.kinematics_valid:
             return False
         speed = math.hypot(vehicle.velocity_x_px, vehicle.velocity_y_px)
-        if speed < self.min_preimpact_speed_px:
+        if speed < self._speed_threshold(self.min_preimpact_speed_px, vehicle):
             return False
 
+        lag_frames = self._window(self.trajectory_reaction_lag_frames)
+        history_frames = self._window(self.trajectory_history_frames)
         baseline_samples = [
             sample
             for sample in vehicle.history
-            if (
-                self.trajectory_reaction_lag_frames
-                <= frame_index - sample.frame_index
-                <= self.trajectory_history_frames
-            )
+            if lag_frames <= frame_index - sample.frame_index <= history_frames
         ]
         if len(baseline_samples) < 2:
             return False
@@ -791,7 +979,9 @@ class CollisionDetector:
         baseline_x = float(last.x) - float(first.x)
         baseline_y = float(last.y) - float(first.y)
         displacement = math.hypot(baseline_x, baseline_y)
-        if displacement < self.trajectory_min_displacement_px:
+        if displacement < self._distance_threshold(
+            self.trajectory_min_displacement_px, vehicle
+        ):
             return False
 
         cosine = (
@@ -826,19 +1016,24 @@ class CollisionDetector:
         vehicle: VehicleState,
         frame_index: int,
     ) -> tuple[float, float] | None:
+        history_frames = self._window(self.crossing_history_frames)
         samples = [
             sample
             for sample in vehicle.history
-            if 0 <= frame_index - sample.frame_index < self.crossing_history_frames
+            if 0 <= frame_index - sample.frame_index < history_frames
         ]
         if len(samples) >= 2:
             first = samples[0].motion_anchor
             last = samples[-1].motion_anchor
             dx = float(last.x) - float(first.x)
             dy = float(last.y) - float(first.y)
-            if math.hypot(dx, dy) >= self.min_preimpact_speed_px:
+            if math.hypot(dx, dy) >= self._distance_threshold(
+                self.min_preimpact_speed_px, vehicle
+            ):
                 return dx, dy
-        if vehicle.kinematics_valid and vehicle.speed_px >= self.min_preimpact_speed_px:
+        if vehicle.kinematics_valid and vehicle.speed_px >= self._speed_threshold(
+            self.min_preimpact_speed_px, vehicle
+        ):
             return vehicle.velocity_x_px, vehicle.velocity_y_px
         return None
 
@@ -859,19 +1054,19 @@ class CollisionDetector:
     ) -> bool:
         if not target.kinematics_valid or not other.kinematics_valid:
             return False
-        if (
-            target.acceleration_px
-            < self.target_impulse_acceleration_threshold
+        if target.acceleration_px < self._acceleration_threshold(
+            self.target_impulse_acceleration_threshold, target
         ):
             return False
         other_reference_speed = max(other.prev_speed_px, other.speed_px)
         return (
-            other_reference_speed >= self.min_preimpact_speed_px
+            other_reference_speed
+            >= self._speed_threshold(self.min_preimpact_speed_px, other)
             and target.prev_speed_px < other_reference_speed
         )
 
     def _had_recent_motion(self, vehicle: VehicleState, frame_index: int) -> bool:
-        history_window = self.impact_window_frames * 2
+        history_window = self._window(self.impact_window_frames) * 2
         return self._has_sustained_motion(
             vehicle,
             frame_index,
@@ -879,12 +1074,14 @@ class CollisionDetector:
         )
 
     def _recent_stop_transition(self, vehicle: VehicleState, frame_index: int) -> bool:
-        if not vehicle.kinematics_valid or vehicle.speed_px > self.stopped_speed_threshold:
+        if not vehicle.kinematics_valid or vehicle.speed_px > self._speed_threshold(
+            self.stopped_speed_threshold, vehicle
+        ):
             return False
         return self._has_sustained_motion(
             vehicle,
             frame_index,
-            self.impact_window_frames,
+            self._window(self.impact_window_frames),
             exclude_current=True,
         )
 
@@ -896,15 +1093,17 @@ class CollisionDetector:
         *,
         exclude_current: bool = False,
     ) -> bool:
+        motion_speed = self._speed_threshold(self.min_preimpact_speed_px, vehicle)
+        required = self._window(self.motion_confirmation_frames)
         consecutive = 0
         for sample in vehicle.history:
             age = frame_index - sample.frame_index
             in_window = 0 <= age <= window_frames
             if exclude_current and age == 0:
                 in_window = False
-            if in_window and sample.speed_px >= self.min_preimpact_speed_px:
+            if in_window and sample.speed_px >= motion_speed:
                 consecutive += 1
-                if consecutive >= self.motion_confirmation_frames:
+                if consecutive >= required:
                     return True
             else:
                 consecutive = 0
@@ -967,7 +1166,9 @@ class CollisionDetector:
 
     def _is_recent(self, evidence_frame: int | None, frame_index: int) -> bool:
         return evidence_frame is not None and (
-            0 <= frame_index - evidence_frame <= self.impact_window_frames
+            0
+            <= frame_index - evidence_frame
+            <= self._window(self.impact_window_frames)
         )
 
     def _is_approach_recent(
@@ -978,7 +1179,7 @@ class CollisionDetector:
         return evidence_frame is not None and (
             0
             <= frame_index - evidence_frame
-            <= self.approach_evidence_window_frames
+            <= self._window(self.approach_evidence_window_frames)
         )
 
     def _is_crossing_approach_recent(
@@ -989,7 +1190,7 @@ class CollisionDetector:
         return evidence_frame is not None and (
             0
             <= frame_index - evidence_frame
-            <= self.crossing_dual_stop_bridge_frames
+            <= self._window(self.crossing_dual_stop_bridge_frames)
         )
 
     @staticmethod
@@ -1033,7 +1234,7 @@ class CollisionDetector:
         if (
             pair_state.last_observation_gap_frame is not None
             and frame_index - pair_state.last_observation_gap_frame
-            > self.crossing_dual_stop_bridge_frames
+            > self._window(self.crossing_dual_stop_bridge_frames)
         ):
             pair_state.last_observation_gap_frame = None
             pair_state.observation_gap_frames = 0
@@ -1089,10 +1290,11 @@ class CollisionDetector:
         )
 
     def _remove_stale_pairs(self, frame_index: int) -> None:
+        ttl = self._window(self.pair_state_ttl_frames)
         stale = [
             pair
             for pair, state in self._pair_states.items()
-            if frame_index - state.last_seen_frame > self.pair_state_ttl_frames
+            if frame_index - state.last_seen_frame > ttl
         ]
         for pair in stale:
             del self._pair_states[pair]

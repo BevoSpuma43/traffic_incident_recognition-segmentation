@@ -90,9 +90,25 @@ un punteggio di confidenza spiegabile.
 Se due track risultano già in contatto quando la coppia viene osservata per la
 prima volta, il contatto viene classificato come preesistente. La coppia resta
 disarmata anche se il jitter delle maschere produce falsi picchi di velocità o
-decelerazione. Il riarmo avviene soltanto dopo una separazione stabile per più
-frame consecutivi; un eventuale ricontatto successivo viene analizzato con le
-regole normali.
+decelerazione. Il riarmo avviene dopo una separazione stabile per più frame
+consecutivi; un eventuale ricontatto successivo viene analizzato con le regole
+normali.
+
+Il disarmo è però limitato in due modi, perché nella versione precedente
+impediva strutturalmente di rilevare gli urti reali.
+
+Il contatto è considerato preesistente soltanto quando **entrambi** i track
+sono appena comparsi. Una coppia nuova formata da un track maturo e da un ID
+appena creato non dimostra che i due veicoli fossero già accostati: nella
+grande maggioranza dei casi il tracker ha riassegnato un ID mentre le sagome si
+occludevano, cioè proprio durante l'impatto. Sul campione diagnostico misurato,
+tutte le coppie disarmate nella finestra dell'incidente avevano un track a
+`observed_frames = 1` e l'altro fra 16 e 149 frame.
+
+Il disarmo non è inoltre più permanente: dopo `preexisting_contact_max_frames`
+frame consecutivi la coppia torna alle regole normali anche se le sagome non si
+sono mai separate. Senza questo limite due veicoli che restano a contatto dopo
+un urto non potevano più generare alcun evento per il resto del video.
 
 Inoltre, il movimento pre-impatto richiede più campioni consecutivi sopra
 soglia. Un singolo salto della segmentazione non è quindi sufficiente a
@@ -193,6 +209,8 @@ Le soglie principali sono centralizzate in `src/config.py`:
 | Conferme richieste | 2 frame |
 | Cooldown della coppia | 30 frame |
 | Separazione per riarmo | 3 frame |
+| Età massima di un track "nuovo" | 10 frame |
+| Scadenza del disarmo preesistente | 45 frame |
 | Filtro EMA della velocità | 0,45 |
 
 Questi valori sono iniziali e devono essere calibrati sul dataset, evitando di
