@@ -21,7 +21,7 @@ dataset/
 calibration/*.jsonl
 calibration/real/
 # Uncomment the line below if you don't want to track YOLO weights
-# *.pt
+*.pt
 
 # IDEs and editors
 .vscode/
