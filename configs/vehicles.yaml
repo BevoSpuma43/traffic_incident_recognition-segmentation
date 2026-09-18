@@ -1,0 +1,6 @@
+# COCO class IDs; custom model classes are resolved by name at runtime.
+classes:
+  car: 2
+  motorcycle: 3
+  bus: 5
+  truck: 7

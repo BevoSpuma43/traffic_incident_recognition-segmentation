@@ -1,6 +1,0 @@
-ultralytics
-opencv-python
-numpy
-customtkinter
-pillow
-pytest

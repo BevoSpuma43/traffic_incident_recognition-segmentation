@@ -1,30 +1,15 @@
-# Python
+.venv/
 __pycache__/
-.pytest_cache/
 *.py[cod]
-*$py.class
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Dataset and models
-dataset/
-*.mp4
-*.avi
-*.mkv
-calibration/*.jsonl
-calibration/real/
-# Uncomment the line below if you don't want to track YOLO weights
-*.pt
-
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
-*.swo
+.pytest_cache/
+.ruff_cache/
+outputs/
+data/raw/*
+data/processed/*
+data/samples/*
+data/calibration/*
+models/**/*.pt
+models/**/*.onnx
+models/**/*.engine
+models/exported/*/
+*.egg-info/

@@ -1,0 +1,17 @@
+project:
+  root_dir: ..
+  output_dir: outputs/demo
+video:
+  source: data/samples/demo.mp4
+  target_fps: 10
+perception:
+  backend: synthetic
+calibration:
+  camera_id: synthetic
+  file: data/calibration/synthetic.yaml
+  detect_camera_motion: false
+features:
+  ema_alpha: 1.0
+events:
+  pre_event_s: 2
+  post_event_s: 2

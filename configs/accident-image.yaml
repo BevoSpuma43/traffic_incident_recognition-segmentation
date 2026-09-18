@@ -1,0 +1,23 @@
+project:
+  root_dir: ..
+  output_dir: outputs/real-videos
+  seed: 42
+video:
+  source: data/raw/ACCIDENT/real_videos/JTIfOGQql0A_00.mp4
+  target_fps: 8
+  max_width: 1280
+perception:
+  model: models/yolo26n-seg.pt
+  backend: pytorch
+  device: cpu
+  image_size: 640
+calibration:
+  camera_id: source_JTIfOGQql0A
+  detect_camera_motion: true
+events:
+  coordinate_mode: image
+  pre_event_s: 3
+  post_event_s: 5
+ui:
+  render_masks: true
+  render_bird_eye: false

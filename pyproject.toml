@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cctv-incident"
+version = "0.1.0"
+description = "Local CCTV incident detection with segmentation, ByteTrack and road homography"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "av>=14,<17", "numpy>=2,<3", "opencv-python>=4.11,<5",
+  "pydantic>=2.10,<3", "pyyaml>=6,<7", "scipy>=1.15,<2",
+  "scikit-image>=0.25,<0.27", "psutil>=6,<8",
+]
+
+[project.optional-dependencies]
+inference = ["ultralytics>=8.4,<9", "lap>=0.5.12", "torch>=2.6", "torchvision>=0.21"]
+ui = ["streamlit>=1.45,<2"]
+ml = ["scikit-learn>=1.6,<2", "joblib>=1.4,<2"]
+onnx = ["onnx>=1.17", "onnxruntime>=1.20"]
+openvino = ["openvino>=2025.0", "nncf>=2.15"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+cctv-incident = "cctv_incident.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cctv_incident"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
