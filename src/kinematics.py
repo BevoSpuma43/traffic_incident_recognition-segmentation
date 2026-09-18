@@ -11,6 +11,7 @@ Funzioni esportate
 ------------------
 compute_speed_px       -- velocità euclidea tra due centroidi (pixel/frame)
 compute_acceleration   -- accelerazione frame-to-frame (pixel/frame²)
+compute_delta_v_px     -- modulo della variazione vettoriale di velocità
 update_stopped_counter -- contatore di frame consecutivi da fermo
 """
 
@@ -173,6 +174,49 @@ def compute_acceleration(
     if frame_delta <= 0:
         return 0.0
     return (float(curr_speed) - float(prev_speed)) / float(frame_delta)
+
+
+def compute_delta_v_px(
+    prev_velocity: tuple[float, float] | None,
+    curr_velocity: tuple[float, float] | None,
+    frame_delta: int = 1,
+) -> float:
+    """
+    Calcola il modulo della variazione vettoriale di velocità (delta-V).
+
+    La formula è la norma della differenza fra i due vettori velocità:
+        |Δv⃗| = |v⃗ₜ − v⃗ₜ₋₁|
+
+    Differisce da ``compute_acceleration`` in modo sostanziale, non cosmetico.
+    Quella funzione deriva la *magnitudine* della velocità, quindi non vede un
+    cambiamento di direzione a modulo costante: un urto laterale che devia un
+    veicolo di 90° senza rallentarlo produce accelerazione scalare ≈ 0 e
+    delta-V pari a v·√2. Il delta-V è la firma fisica dell'impatto — è la
+    grandezza che compare nella conservazione della quantità di moto — mentre
+    la derivata del modulo ne cattura solo la componente longitudinale.
+
+    Parameters
+    ----------
+    prev_velocity : tuple[float, float] | None
+        Vettore velocità del frame precedente (vx, vy) in pixel/frame.
+        Se None il delta-V non è calcolabile: restituisce 0.0.
+    curr_velocity : tuple[float, float] | None
+        Vettore velocità del frame corrente (vx, vy) in pixel/frame.
+    frame_delta : int
+        Frame trascorsi fra i due campioni, per normalizzare la variazione.
+
+    Returns
+    -------
+    float
+        Delta-V in pixel/frame², sempre >= 0 perché è un modulo. A differenza
+        dell'accelerazione scalare non ha segno: non distingue una frenata da
+        un'accelerazione, distingue un moto perturbato da uno regolare.
+    """
+    if prev_velocity is None or curr_velocity is None or frame_delta <= 0:
+        return 0.0
+    delta_x = float(curr_velocity[0]) - float(prev_velocity[0])
+    delta_y = float(curr_velocity[1]) - float(prev_velocity[1])
+    return math.hypot(delta_x, delta_y) / float(frame_delta)
 
 
 def update_stopped_counter(

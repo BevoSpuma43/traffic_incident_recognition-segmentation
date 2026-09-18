@@ -1,6 +1,6 @@
 # Stato del progetto e modifiche recenti
 
-Data di aggiornamento: 28 agosto 2026
+Data di aggiornamento: 12 settembre 2026
 Branch di riferimento: `main_v2`
 
 ## 1. Obiettivo del progetto
@@ -28,7 +28,7 @@ metadati.
 Verifiche effettuate:
 
 - compilazione dei moduli `src` e `tests` completata;
-- suite automatica: 52 test superati su 52;
+- suite automatica: 82 test superati su 82;
 - benchmark end-to-end completato su un video reale;
 - 2.027 righe di metadati associate a 2.027 file MP4;
 - nessun path video mancante o duplicato.
@@ -43,6 +43,9 @@ due frame consecutivi. Il sistema ora:
 - usa il punto inferiore centrale della bounding box come ancora di movimento;
 - normalizza velocità e accelerazione per il numero di frame trascorsi;
 - applica un filtro esponenziale EMA alla velocità;
+- conserva **due velocità**: quella filtrata per stimare traiettoria e
+  direzione, quella grezza per misurare il transitorio di un urto;
+- calcola il delta-V, cioè il modulo della variazione vettoriale di velocità;
 - conserva una cronologia limitata dei campioni cinematici;
 - invalida la cinematica dopo gap di tracking troppo lunghi;
 - impedisce ai track nuovi di essere immediatamente classificati come fermi;
@@ -74,6 +77,7 @@ un'anomalia coerente con un impatto:
 
 - avvicinamento relativo;
 - forte decelerazione;
+- delta-V oltre soglia, cioè una variazione brusca del *vettore* velocità;
 - transizione recente da movimento ad arresto;
 - arresto di entrambi i veicoli, accettato solo in presenza di moto precedente.
 
@@ -177,6 +181,70 @@ ma senza un vero gap di tracking il solo arresto simultaneo viene rifiutato.
 Questo limita il rischio di classificare come urto due veicoli che si fermano
 normalmente per concedersi la precedenza.
 
+### 3.9 Coppie nate nell'istante dell'urto
+
+Quando il tracker riassegna un ID durante l'occlusione di un impatto, la coppia
+che conta nasce nel frame del contatto. Tutti i gate basati sulla persistenza
+diventano allora insoddisfacibili non perché l'evidenza manchi, ma perché manca
+il tempo per ripeterla: `approach_confirmation_frames` chiede tre frame
+consecutivi di avvicinamento a una coppia che esiste da uno.
+
+Per le sole coppie osservate da pochi frame è quindi ammesso un percorso
+alternativo in cui l'intensità sostituisce la persistenza: un singolo frame con
+closing speed almeno quattro volte la soglia vale come avvicinamento sostenuto.
+Sostituisce quel gate soltanto; contatto, movimento precedente ed evidenza
+dinamica restano richiesti, ed è da loro che il meccanismo prende la propria
+precisione. Sulle righe in cui scatta, il 97% muore con la coppia mai diventata
+candidata e solo il 7% ha un contatto spaziale.
+
+Su 30 video stratificati l'intervento recupera un vero positivo — un `t-bone`
+notturno, attribuito alla coppia corretta con 0,60 s di ritardo — senza
+aggiungere alcun falso positivo, e non modifica nessuno dei quattro casi di
+regressione. È un miglioramento reale ma piccolo, misurato dove il sistema
+emette pochissimo.
+
+È stata inoltre implementata, e lasciata **disattivata**, una
+re-identificazione che fa ereditare la storia cinematica quando un ID nuovo
+compare dove un altro è appena sparito. La misura ne ha mostrato il limite:
+il 59% delle nascite di ID non ha alcun track sparito nei frame precedenti, e
+fra le altre il donatore migliore dista in mediana due lunghezze di veicolo.
+Su posizione e scala l'associazione non è separabile; servirebbe un descrittore
+d'aspetto.
+
+### 3.10 Urti che deviano senza rallentare
+
+L'accelerazione usata finora è la derivata della *magnitudine* della velocità.
+Un urto laterale che devia un veicolo di 90 gradi senza rallentarlo produce
+quindi accelerazione pari a zero e non attiva alcuna evidenza dinamica, pur
+essendo l'urto più violento dei due casi. È una cecità strutturale, non una
+questione di soglia, e riguarda una classe numerosa: 657 dei 2.027 video sono
+`t-bone`.
+
+Il sistema calcola perciò anche il delta-V, il modulo della variazione
+vettoriale di velocità fra due frame, che è la grandezza che compare nella
+conservazione della quantità di moto. Viene usato come evidenza dinamica
+**accanto** alla decelerazione, mai al suo posto.
+
+Due dettagli non ovvi:
+
+- il delta-V è misurato sulla velocità **grezza**, perché il filtro EMA è
+  tarato per stabilizzare la traiettoria e smorzerebbe proprio il picco da
+  rilevare;
+- richiede due frame entrambi misurati, altrimenti il primo campione di un
+  track varrebbe l'intera velocità e ogni veicolo appena apparso risulterebbe
+  urtato.
+
+Sul campione misurato l'intervento recupera un `t-bone` in cui il delta-V è
+l'unica evidenza dinamica disponibile, senza aggiungere falsi positivi e senza
+modificare i casi di regressione.
+
+Il delta-V **non** viene invece usato come prova di attribuzione fra
+traiettorie incrociate, benché fosse l'uso più promettente. La misura lo ha
+mostrato dannoso: un veicolo che attraversa più flussi ha delta-V elevato su
+ogni coppia con cui si sovrappone visivamente, quindi la perturbazione smette
+di essere locale e riemerge il difetto descritto in 3.7. Su
+`987C4_UdnJE_01` si torna ai cinque eventi precedenti alla correzione.
+
 ## 4. Configurazione attuale
 
 Le soglie principali sono centralizzate in `src/config.py`:
@@ -212,6 +280,16 @@ Le soglie principali sono centralizzate in `src/config.py`:
 | Età massima di un track "nuovo" | 10 frame |
 | Scadenza del disarmo preesistente | 45 frame |
 | Filtro EMA della velocità | 0,45 |
+| Avvicinamento impulsivo | attivo |
+| Età massima di una coppia "giovane" | 3 frame |
+| Moltiplicatore del closing speed impulsivo | 4,0 |
+| Evidenza delta-V | attiva |
+| Soglia di delta-V d'impatto | 10 px/frame² |
+| Delta-V per traiettorie incrociate | disattivato |
+| Re-identificazione dei track | disattivata |
+| Gap massimo per la re-identificazione | 5 frame |
+| Distanza massima del donatore | 0,8 diagonali |
+| Rapporto di scala massimo del donatore | 2,0 |
 
 Questi valori sono iniziali e devono essere calibrati sul dataset, evitando di
 ottimizzarli sulla sola sequenza usata per lo smoke test.
@@ -316,6 +394,14 @@ ancora rilevato. Il caso rimane quindi utile anche come test di recall: il
 filtro ha corretto i falsi positivi precedenti, ma il riconoscimento dell'evento
 annotato richiede ulteriore lavoro su tracking e dinamica laterale.
 
+**Aggiornamento del 12 settembre 2026.** La rimisura di questo caso non dà più
+zero falsi positivi: viene emesso un evento sulla coppia `2-54` al frame 416,
+fuori dalla finestra dell'incidente. Il risultato corrente è quindi
+0 TP / 1 FP / 1 FN. La regressione è anteriore al lavoro sul punto 2b — i due
+meccanismi introdotti lì non cambiano nulla su questo video — ma non è stato
+possibile attribuirla a un intervento preciso, perché i log JSONL su cui questa
+scheda era stata scritta non sono più in repo.
+
 ### Caso di regressione: veicolo mobile contro veicolo fermo
 
 Video: `95Tx-2p0O_E_00.mp4`
@@ -361,6 +447,14 @@ I benchmark di non-regressione mantengono `95Tx-2p0O_E_00.mp4` a 1 TP e 0 FP
 e `8G56ILxFFNM_00.mp4` a 0 FP; il `sideswipe` di quest'ultimo resta non
 rilevato.
 
+**Aggiornamento del 12 settembre 2026.** Anche questa scheda non regge più alla
+rimisura: gli eventi sono tornati a due, perché oltre alla coppia corretta
+`19-20` al frame 36 ne viene emessa una sulla coppia `9-19` al frame 34 — una
+delle sovrapposizioni prospettiche che la scheda dichiara soppresse. Il
+risultato corrente è 1 TP / 1 FP. Vale la stessa nota del caso precedente:
+regressione anteriore al punto 2b, non attribuibile a un intervento preciso
+senza i log originali.
+
 ### Caso di regressione: arresto simultaneo dopo occlusione
 
 Video: `D1eP4Bn4hDQ_0_00.mp4`
@@ -403,6 +497,17 @@ La suite comprende test per:
 - conferma del dual stop incrociato dopo un breve gap di tracking;
 - rifiuto del dual stop incrociato quando il gap di tracking non esiste;
 - rifiuto di un contatto solo dilatato con evidenza dinamica scaduta;
+- conferma di una coppia giovane su un singolo frame di avvicinamento intenso,
+  e rifiuto della stessa sequenza quando il percorso impulsivo è disattivato;
+- rifiuto della scorciatoia impulsiva su una coppia matura;
+- eredità della storia cinematica dopo una riassegnazione di ID, e rifiuto del
+  donatore troppo distante, ancora visibile o di dimensione incompatibile;
+- conversione degli override `--set` nei tipi dichiarati da `AppConfig`;
+- calcolo del delta-V e sua cecità della derivata del modulo a una deviazione
+  a velocità costante;
+- uso della velocità grezza e non di quella filtrata per il delta-V;
+- conferma di un urto che devia senza rallentare, e suo rifiuto quando il
+  delta-V è disattivato o sotto soglia;
 - caricamento di `metadata-real.csv`;
 - matching per timestamp e frame;
 - aggregazione delle metriche per gruppo;
@@ -414,7 +519,7 @@ Comando verificato:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Risultato corrente: `52 passed`.
+Risultato corrente: `82 passed`.
 
 ## 9. Limiti ancora aperti
 
@@ -432,14 +537,25 @@ Risultato corrente: `52 passed`.
 
 ## 10. Prossimi passi consigliati
 
-1. Eseguire un benchmark stratificato su un piccolo campione per ogni tipo,
-   fascia oraria e livello di qualità.
-2. Confrontare `yolo26n-seg.pt`, `yolo26s-seg.pt` e `yolo26m-seg.pt` su recall
-   delle detection e costo computazionale.
-3. Calibrare prima la soglia di confidenza YOLO e i parametri ByteTrack, poi le
-   soglie del rilevatore di collisione.
-4. Aggiungere video negativi e misurare i falsi allarmi per ora di filmato.
-5. Valutare una trasformazione prospettica o una normalizzazione della
-   cinematica rispetto alla scala apparente del veicolo.
-6. Analizzare separatamente i casi `single`, che non possono essere rilevati da
-   una logica limitata alle collisioni tra coppie di veicoli.
+L'ordine dettagliato e motivato dalle misure è in `CRASH_DETECTION_PLAN.md`;
+qui resta la sintesi.
+
+1. Allentare il limite di età del contatto candidato. Sul campione misurato è
+   lo stadio che azzera il funnel, e in un caso la coppia reale perde la
+   candidatura per un solo frame di età.
+2. Ricostruire le due schede di regressione qui sopra su log nuovi, così che
+   tornino a descrivere il comportamento reale del sistema.
+3. Recuperare il tetto di percezione: sui 30 video del campione solo 19 hanno
+   due track nella finestra dell'incidente e 14 arrivano al contatto. Metà dei
+   falsi negativi non è raggiungibile dalla logica di collisione. Da qui il
+   confronto fra `yolo26n-seg.pt`, `yolo26s-seg.pt` e `yolo26m-seg.pt` e la
+   taratura di confidenza YOLO e parametri ByteTrack.
+4. Salvare la geometria dei track nei log diagnostici, per poter rieseguire la
+   sola logica di collisione senza ripagare l'inferenza YOLO a ogni variante.
+5. Esporre una soglia sul punteggio di confidenza degli eventi, oggi calcolato
+   ma mai usato: il sistema ha un solo punto operativo e non è possibile
+   tracciare una curva precision/recall.
+6. Aggiungere video negativi e misurare i falsi allarmi per ora di filmato.
+7. Analizzare separatamente i casi `single`, che non possono essere rilevati da
+   una logica limitata alle collisioni tra coppie di veicoli: uno dei due falsi
+   positivi misurati è esattamente di questo tipo.

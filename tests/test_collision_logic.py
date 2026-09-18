@@ -34,6 +34,7 @@ def _state(
     *,
     speed: float,
     acceleration: float = 0.0,
+    delta_v: float = 0.0,
     stopped_frames: int = 0,
     velocity_x: float = 0.0,
     velocity_y: float = 0.0,
@@ -80,6 +81,9 @@ def _state(
         prev_motion_anchor=anchor,
         velocity_x_px=velocity_x,
         velocity_y_px=velocity_y,
+        raw_velocity_x_px=velocity_x,
+        raw_velocity_y_px=velocity_y,
+        delta_v_px=delta_v,
         kinematics_valid=True,
         observed_frames=max(2, len(history_speeds)),
         confidence=0.9,
@@ -1142,6 +1146,106 @@ def test_strong_impact_after_tracking_gap_is_confirmed_immediately() -> None:
     assert detector.last_diagnostics[0].bridged_strong_impact is True
 
 
+def _impact_pair(frame_index: int, *, decelerating: bool) -> list[VehicleState]:
+    """Veicolo che arriva da sinistra e tocca un veicolo fermo.
+
+    L'overlap e solo dilatato (area 0): senza avvicinamento confermato la
+    coppia non ha nessuna altra strada per diventare candidata, quindi il test
+    misura davvero la scorciatoia impulsiva e non un'altra regola.
+    """
+    mover = _make_mask(2, 2, 8, 5)
+    target = _make_mask(2, 5, 8, 8)
+    return [
+        _state(
+            170,
+            mover,
+            frame_index,
+            speed=7.0,
+            acceleration=-6.0 if decelerating else 0.0,
+            velocity_x=7.0,
+            history_speeds=(7.0, 7.0),
+        ),
+        _state(171, target, frame_index, speed=0.0, history_speeds=(0.0, 0.0)),
+    ]
+
+
+def test_young_pair_confirms_on_a_single_strong_closing_frame() -> None:
+    detector = _detector(approach_confirmation_frames=3)
+
+    first = detector.detect_collisions(_impact_pair(0, decelerating=True), 0)
+    second = detector.detect_collisions(_impact_pair(1, decelerating=False), 1)
+
+    assert first == []
+    assert len(second) == 1
+    assert "impulse_approach" in second[0].reason
+
+
+def test_without_the_impulse_path_the_same_young_pair_is_rejected() -> None:
+    detector = _detector(
+        approach_confirmation_frames=3,
+        impulse_approach_enabled=False,
+    )
+
+    first = detector.detect_collisions(_impact_pair(0, decelerating=True), 0)
+    second = detector.detect_collisions(_impact_pair(1, decelerating=False), 1)
+
+    assert first == []
+    assert second == []
+
+
+def test_mature_pair_still_needs_a_sustained_approach() -> None:
+    detector = _detector(
+        approach_confirmation_frames=3,
+        young_pair_max_frames=3,
+    )
+    far_mover = _make_mask(2, 12, 8, 15)
+    target = _make_mask(2, 5, 8, 8)
+
+    # Quattro frame in cui la coppia esiste ma si allontana: da qui in poi la
+    # persistenza e disponibile, quindi la scorciatoia non deve piu valere.
+    for frame_index in range(4):
+        detector.detect_collisions(
+            [
+                _state(
+                    180,
+                    far_mover,
+                    frame_index,
+                    speed=7.0,
+                    velocity_x=7.0,
+                    history_speeds=(7.0, 7.0),
+                ),
+                _state(
+                    181, target, frame_index, speed=0.0, history_speeds=(0.0, 0.0)
+                ),
+            ],
+            frame_index,
+        )
+
+    mover = _make_mask(2, 2, 8, 5)
+    events = [
+        detector.detect_collisions(
+            [
+                _state(
+                    180,
+                    mover,
+                    frame_index,
+                    speed=7.0,
+                    acceleration=-6.0 if frame_index == 4 else 0.0,
+                    velocity_x=7.0,
+                    history_speeds=(7.0, 7.0),
+                ),
+                _state(
+                    181, target, frame_index, speed=0.0, history_speeds=(0.0, 0.0)
+                ),
+            ],
+            frame_index,
+        )
+        for frame_index in (4, 5)
+    ]
+
+    assert events == [[], []]
+
+
 def test_dilated_only_contact_does_not_reuse_stale_dynamic_evidence() -> None:
     detector = _detector(collision_confirmation_frames=2)
     mask_a = _make_mask(2, 2, 8, 5)
@@ -1172,3 +1276,169 @@ def test_dilated_only_contact_does_not_reuse_stale_dynamic_evidence() -> None:
 
     assert first == []
     assert second == []
+
+
+def _deflected_pair(frame_index: int) -> list[VehicleState]:
+    """Urto che devia un veicolo senza rallentarlo.
+
+    Accelerazione scalare nulla su entrambi i veicoli, nessun arresto, nessun
+    impulso sul bersaglio: l'unica evidenza dinamica disponibile e il delta-V.
+    """
+    mover = _make_mask(2, 2, 8, 5)
+    target = _make_mask(2, 5, 8, 8)
+    return [
+        _state(
+            190,
+            mover,
+            frame_index,
+            speed=8.0,
+            acceleration=0.0,
+            delta_v=12.0,
+            velocity_x=8.0,
+            history_speeds=(8.0, 8.0),
+        ),
+        _state(
+            191,
+            target,
+            frame_index,
+            speed=0.0,
+            acceleration=0.0,
+            history_speeds=(0.0, 0.0),
+        ),
+    ]
+
+
+def test_delta_v_confirms_an_impact_that_does_not_change_speed() -> None:
+    detector = _detector(
+        delta_v_evidence_enabled=True,
+        delta_v_impact_threshold_px=10.0,
+    )
+
+    first = detector.detect_collisions(_deflected_pair(0), 0)
+    second = detector.detect_collisions(_deflected_pair(1), 1)
+
+    assert first == []
+    assert len(second) == 1
+    assert "delta_v_impact" in second[0].reason
+    assert second[0].delta_v_px == pytest.approx(12.0)
+
+
+def test_without_delta_v_the_same_deflection_is_invisible() -> None:
+    detector = _detector(delta_v_evidence_enabled=False)
+
+    first = detector.detect_collisions(_deflected_pair(0), 0)
+    second = detector.detect_collisions(_deflected_pair(1), 1)
+
+    assert first == []
+    assert second == []
+
+
+def test_delta_v_below_the_threshold_is_not_evidence() -> None:
+    detector = _detector(
+        delta_v_evidence_enabled=True,
+        delta_v_impact_threshold_px=20.0,
+    )
+
+    first = detector.detect_collisions(_deflected_pair(0), 0)
+    second = detector.detect_collisions(_deflected_pair(1), 1)
+
+    assert first == []
+    assert second == []
+
+
+def test_delta_v_is_recorded_in_diagnostics_even_when_the_gate_is_off() -> None:
+    detector = _detector(delta_v_evidence_enabled=False)
+
+    detector.detect_collisions(_deflected_pair(0), 0)
+
+    diagnostic = detector.last_diagnostics[0]
+    assert diagnostic.delta_v_a_px == pytest.approx(12.0)
+    assert diagnostic.delta_v_impact is False
+
+
+def _crossing_trio(frame_index: int) -> list[VehicleState]:
+    """Un veicolo trasversale che ne sfiora due, ma ne urta uno solo.
+
+    Il track 200 attraversa orizzontalmente ed e in contatto con entrambi i
+    veicoli verticali. Il suo delta-V e lo stesso per entrambe le coppie, perche
+    appartiene a lui: a distinguere e il delta-V del bersaglio, alto solo su
+    quello realmente colpito.
+    """
+    crossing = _make_mask(6, 2, 12, 16)
+    hit = _make_mask(2, 12, 8, 18)
+    grazed = _make_mask(2, 2, 8, 8)
+    return [
+        _state(
+            200,
+            crossing,
+            frame_index,
+            speed=8.0,
+            delta_v=14.0,
+            velocity_x=8.0,
+            history_speeds=(8.0, 8.0),
+        ),
+        _state(
+            201,
+            hit,
+            frame_index,
+            speed=6.0,
+            delta_v=30.0,
+            velocity_y=6.0,
+            history_speeds=(6.0, 6.0),
+        ),
+        _state(
+            202,
+            grazed,
+            frame_index,
+            speed=6.0,
+            delta_v=0.0,
+            velocity_y=6.0,
+            history_speeds=(6.0, 6.0),
+        ),
+    ]
+
+
+def test_crossing_delta_v_attributes_the_impact_to_one_pair_only() -> None:
+    detector = _detector(
+        delta_v_evidence_enabled=False,
+        delta_v_crossing_disruption_enabled=True,
+        delta_v_impact_threshold_px=10.0,
+        collision_confirmation_frames=1,
+    )
+
+    events = detector.detect_collisions(_crossing_trio(0), 0)
+
+    attributed = {
+        (event.track_id_a, event.track_id_b) for event in events
+    }
+    # La coppia sfiorata non puo usare il delta-V del veicolo trasversale:
+    # e il difetto che la versione a soglia assoluta reintroduceva.
+    assert (200, 202) not in attributed
+
+
+def test_delta_v_crossing_winner_is_the_most_disturbed_pair() -> None:
+    detector = _detector(
+        delta_v_evidence_enabled=False,
+        delta_v_crossing_disruption_enabled=True,
+        delta_v_impact_threshold_px=10.0,
+    )
+
+    detector.detect_collisions(_crossing_trio(0), 0)
+
+    by_pair = {
+        (d.track_id_a, d.track_id_b): d for d in detector.last_diagnostics
+    }
+    # Entrambe le coppie vedono il delta-V del track trasversale, ma solo quella
+    # col bersaglio perturbato supera la soglia dell'episodio.
+    assert by_pair[(200, 201)].delta_v_a_px == pytest.approx(14.0)
+    assert by_pair[(200, 202)].delta_v_a_px == pytest.approx(14.0)
+    assert detector._pair_states[(200, 201)].contact_delta_v_px == pytest.approx(30.0)
+    assert detector._pair_states[(200, 202)].contact_delta_v_px == pytest.approx(14.0)
+
+
+def test_competitive_selection_is_inert_when_the_flag_is_off() -> None:
+    detector = _detector(delta_v_crossing_disruption_enabled=False)
+
+    detector.detect_collisions(_crossing_trio(0), 0)
+
+    assert detector._delta_v_crossing_winners([]) == set()

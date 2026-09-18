@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import replace
+from collections.abc import Iterable
+from dataclasses import fields, replace
 from pathlib import Path
 
 import cv2
@@ -19,7 +20,7 @@ from src.calibration import (
     summarize_annotations,
     summarize_diagnostics,
 )
-from src.config import load_default_config
+from src.config import AppConfig, load_default_config
 from src.video_pipeline import TrafficAccidentPipeline
 
 
@@ -54,6 +55,39 @@ def select_annotations(
     return selected[: max(0, limit)] if limit is not None else selected
 
 
+def parse_config_overrides(values: Iterable[str]) -> dict[str, object]:
+    """Converte ``--set nome=valore`` nei tipi dichiarati da AppConfig.
+
+    Serve a misurare due configurazioni sullo stesso campione senza modificare
+    ``src/config.py`` fra un run e l'altro: una modifica al file sorgente non
+    finisce nel log, mentre gli override vengono salvati nel record `metadata`
+    di ogni JSONL insieme al resto della configurazione.
+    """
+    field_types = {item.name: item.type for item in fields(AppConfig)}
+    overrides: dict[str, object] = {}
+    for raw in values:
+        name, separator, value = raw.partition("=")
+        name = name.strip()
+        if not separator or name not in field_types:
+            raise ValueError(f"Override non valido: {raw!r}")
+        declared = str(field_types[name])
+        text = value.strip()
+        if declared.startswith("bool"):
+            lowered = text.casefold()
+            if lowered not in {"true", "false", "1", "0", "yes", "no"}:
+                raise ValueError(f"Valore booleano non valido: {raw!r}")
+            overrides[name] = lowered in {"true", "1", "yes"}
+        elif declared.startswith("int"):
+            overrides[name] = int(text)
+        elif declared.startswith("float"):
+            overrides[name] = float(text)
+        elif declared.startswith("str"):
+            overrides[name] = text
+        else:
+            raise ValueError(f"Tipo non sovrascrivibile dalla CLI: {name}")
+    return overrides
+
+
 def run_video(
     annotation: Annotation,
     *,
@@ -61,6 +95,7 @@ def run_video(
     model_path: str,
     log_path: Path,
     diagnostics: bool,
+    config_overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
     video_path = _resolve_dataset_path(dataset_root, annotation.video_path)
     if not video_path.is_file():
@@ -84,6 +119,7 @@ def run_video(
         # cinematiche e le finestre temporali resterebbero espresse nei frame
         # del video di riferimento invece che in durate confrontabili.
         video_fps=max(0.0, decoder_fps),
+        **(config_overrides or {}),
     )
     pipeline: TrafficAccidentPipeline | None = None
     processed_frames = 0
@@ -195,9 +231,21 @@ def main() -> None:
         action="store_true",
         help="Salva anche ogni coppia/frame (output molto voluminoso)",
     )
+    parser.add_argument(
+        "--set",
+        action="append",
+        dest="config_overrides",
+        metavar="NOME=VALORE",
+        help=(
+            "Sovrascrive un campo di AppConfig per questa esecuzione; "
+            "opzione ripetibile"
+        ),
+    )
     parser.add_argument("--tolerance-frames", type=int, default=0)
     parser.add_argument("--tolerance-seconds", type=float, default=1.0)
     args = parser.parse_args()
+
+    config_overrides = parse_config_overrides(args.config_overrides or [])
 
     annotations = select_annotations(
         load_annotations(args.metadata),
@@ -227,6 +275,7 @@ def main() -> None:
                     model_path=args.model,
                     log_path=log_path,
                     diagnostics=args.diagnostics,
+                    config_overrides=config_overrides,
                 )
             )
         except Exception as exc:
@@ -282,6 +331,7 @@ def main() -> None:
             "split": args.split,
             "types": args.accident_types or [],
             "videos": args.video_names or [],
+            "config_overrides": config_overrides,
             "selected_videos": len(annotations),
             "completed_videos": len(completed_logs),
         },

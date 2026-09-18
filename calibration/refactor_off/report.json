@@ -1,0 +1,280 @@
+{
+  "selection": {
+    "metadata": "dataset/metadata-real.csv",
+    "dataset_root": "dataset",
+    "model": "yolo26n-seg.pt",
+    "split_field": null,
+    "split": null,
+    "types": [],
+    "videos": [
+      "OXVXsdDT9QQ_00.mp4",
+      "fzWY0vLAXzI_00.mp4",
+      "M6WWLqx3z88_00.mp4"
+    ],
+    "config_overrides": {},
+    "selected_videos": 3,
+    "completed_videos": 3
+  },
+  "ground_truth": {
+    "annotated_videos": 3,
+    "accident_types": {
+      "sideswipe": 1,
+      "t-bone": 2
+    },
+    "metadata_average_fps": {
+      "min": 14.966666666666667,
+      "median": 16.60377358490566,
+      "p90": 16.60377358490566,
+      "max": 21.203009113008203
+    },
+    "frame_timestamp_error_seconds": {
+      "min": 0.02386363636363653,
+      "median": 0.028545657015590198,
+      "p90": 0.028545657015590198,
+      "max": 0.04964570212765995
+    },
+    "out_of_range_accident_frames": 0
+  },
+  "diagnostics": {
+    "frame_rows": 728,
+    "frames_with_detections": 728,
+    "frames_with_multiple_tracks": 710,
+    "max_active_tracks": 6,
+    "track_rows": 2408,
+    "unique_track_ids": 45,
+    "diagnostic_rows": 3142,
+    "preexisting_contact_rows": 23,
+    "contact_rows": 142,
+    "emitted_rows": 3,
+    "contact_overlap_ratio": {
+      "min": 0.0,
+      "median": 0.09254009109314465,
+      "p90": 1.0,
+      "max": 1.0
+    },
+    "contact_closing_speed_px": {
+      "min": 0.0,
+      "median": 0.0,
+      "p90": 1.6170071422399916,
+      "max": 43.461449232474045
+    },
+    "contact_spatial_distance_px": {
+      "min": 0.0,
+      "median": 0.0,
+      "p90": 0.0,
+      "max": 3.0
+    }
+  },
+  "performance": {
+    "processed_frames": 728,
+    "elapsed_seconds": 53.54105169977993,
+    "processing_seconds": 53.3189768998418,
+    "end_to_end_fps": 13.597043331948452,
+    "processing_fps": 13.653675339035997,
+    "video_duration_seconds": 44.166666,
+    "end_to_end_realtime_factor": 0.8249121860298,
+    "processing_realtime_factor": 0.8283479647962083
+  },
+  "evaluation": {
+    "evaluated_videos": 3,
+    "true_positives": 2,
+    "false_positives": 1,
+    "false_negatives": 1,
+    "precision": 0.6666666666666666,
+    "recall": 0.6666666666666666,
+    "f1": 0.6666666666666666,
+    "mean_delay_frames": -1.5,
+    "median_delay_frames": -1.5,
+    "mean_delay_seconds": -0.03333333333333338,
+    "median_delay_seconds": -0.03333333333333338
+  },
+  "by_group": {
+    "label": {
+      "sideswipe": {
+        "evaluated_videos": 1,
+        "true_positives": 0,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 0.0,
+        "mean_delay_seconds": 0.0,
+        "median_delay_seconds": 0.0
+      },
+      "t-bone": {
+        "evaluated_videos": 2,
+        "true_positives": 2,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": -1.5,
+        "median_delay_frames": -1.5,
+        "mean_delay_seconds": -0.03333333333333338,
+        "median_delay_seconds": -0.03333333333333338
+      }
+    },
+    "rollover": {
+      "False": {
+        "evaluated_videos": 2,
+        "true_positives": 1,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "mean_delay_frames": 10.0,
+        "median_delay_frames": 10,
+        "mean_delay_seconds": 0.6000000000000002,
+        "median_delay_seconds": 0.6000000000000002
+      },
+      "True": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": -13.0,
+        "median_delay_frames": -13,
+        "mean_delay_seconds": -0.666666666666667,
+        "median_delay_seconds": -0.666666666666667
+      }
+    },
+    "scene_layout": {
+      "signalized_intersection": {
+        "evaluated_videos": 3,
+        "true_positives": 2,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.6666666666666666,
+        "recall": 0.6666666666666666,
+        "f1": 0.6666666666666666,
+        "mean_delay_frames": -1.5,
+        "median_delay_frames": -1.5,
+        "mean_delay_seconds": -0.03333333333333338,
+        "median_delay_seconds": -0.03333333333333338
+      }
+    },
+    "weather": {
+      "normal": {
+        "evaluated_videos": 2,
+        "true_positives": 1,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "mean_delay_frames": 10.0,
+        "median_delay_frames": 10,
+        "mean_delay_seconds": 0.6000000000000002,
+        "median_delay_seconds": 0.6000000000000002
+      },
+      "snow": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": -13.0,
+        "median_delay_frames": -13,
+        "mean_delay_seconds": -0.666666666666667,
+        "median_delay_seconds": -0.666666666666667
+      }
+    },
+    "day_time": {
+      "day": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": -13.0,
+        "median_delay_frames": -13,
+        "mean_delay_seconds": -0.666666666666667,
+        "median_delay_seconds": -0.666666666666667
+      },
+      "night": {
+        "evaluated_videos": 2,
+        "true_positives": 1,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "mean_delay_frames": 10.0,
+        "median_delay_frames": 10,
+        "mean_delay_seconds": 0.6000000000000002,
+        "median_delay_seconds": 0.6000000000000002
+      }
+    },
+    "quality": {
+      "Fine": {
+        "evaluated_videos": 3,
+        "true_positives": 2,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.6666666666666666,
+        "recall": 0.6666666666666666,
+        "f1": 0.6666666666666666,
+        "mean_delay_frames": -1.5,
+        "median_delay_frames": -1.5,
+        "mean_delay_seconds": -0.03333333333333338,
+        "median_delay_seconds": -0.03333333333333338
+      }
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\fzWY0vLAXzI_00.mp4",
+      "label": "t-bone",
+      "accident_frame": 88,
+      "processed_frames": 189,
+      "event_count": 1,
+      "decoder_fps": 21.15671641791045,
+      "elapsed_seconds": 12.212562099797651,
+      "startup_seconds": 0.11191989993676543,
+      "processing_seconds": 12.100642199860886,
+      "processing_fps": 15.619005741874826
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\OXVXsdDT9QQ_00.mp4",
+      "label": "t-bone",
+      "accident_frame": 17,
+      "processed_frames": 89,
+      "event_count": 1,
+      "decoder_fps": 16.6875,
+      "elapsed_seconds": 6.170142499962822,
+      "startup_seconds": 0.056735699996352196,
+      "processing_seconds": 6.113406799966469,
+      "processing_fps": 14.558167468994235
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\M6WWLqx3z88_00.mp4",
+      "label": "sideswipe",
+      "accident_frame": 30,
+      "processed_frames": 450,
+      "event_count": 1,
+      "decoder_fps": 14.966740576496674,
+      "elapsed_seconds": 35.158347100019455,
+      "startup_seconds": 0.05341920000500977,
+      "processing_seconds": 35.104927900014445,
+      "processing_fps": 12.818713124313662
+    }
+  ]
+}

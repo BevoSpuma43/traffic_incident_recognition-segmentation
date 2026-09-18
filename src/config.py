@@ -190,6 +190,116 @@ class AppConfig:
     # urto non possono piu generare alcun evento. Con 0 il limite e disattivato.
     preexisting_contact_max_frames: int = 45
 
+    # ------------------------------------------------------------------
+    # Punto 2b: coppie senza storia cinematica
+    # ------------------------------------------------------------------
+    # Misurando il punto 2 e emerso che il vero collo di bottiglia non sono le
+    # soglie ma le coppie che nascono nell'istante dell'urto: in 5 dei 6 video
+    # bloccati su `sustained_approach` la sequenza diagnostica della coppia
+    # inizia esattamente al frame del primo contatto, perche il tracker
+    # riassegna un ID durante l'occlusione dell'impatto. Su una coppia che
+    # esiste da 1-3 frame nessun gate basato sulla persistenza e soddisfacibile.
+    # Due rimedi indipendenti, entrambi disattivabili separatamente.
+
+    # (a) Re-identificazione: quando un ID nuovo compare dove un altro e appena
+    # sparito, il nuovo track eredita la storia cinematica del precedente
+    # invece di ripartire da zero. Attacca il problema alla radice: rimette in
+    # funzione tutti i gate storici (had_recent_motion, closing_speed,
+    # _is_stably_stationary, traiettoria) invece di aggirarne uno solo.
+    #
+    # DEFAULT OFF perche misurata inefficace, non perche non sia stata provata.
+    # Su 34 video scatta 44 volte senza spostare un solo stadio del funnel e
+    # senza cambiare un solo evento: gli ID adottati sono track periferici.
+    # Il motivo e nella geometria, non nella logica: il 59% delle nascite di ID
+    # non ha alcun track sparito nei 5 frame precedenti (sono veicoli che
+    # entrano in scena, non riassegnazioni), e fra le altre il donatore migliore
+    # dista in mediana 2,19 diagonali di bbox. Non esiste una soglia che separi.
+    # Alzarla comprerebbe copertura tirando a indovinare. Il codice resta perche
+    # l'impalcatura e riusabile: a dover cambiare e la funzione di somiglianza,
+    # che su questi dati richiede un descrittore d'aspetto e non la posizione.
+    # Vedi CRASH_DETECTION_PLAN.md, punto 2b.
+    track_reid_enabled: bool = False
+    # Un ID puo ereditare solo da un track sparito da pochi frame: oltre questa
+    # distanza l'associazione diventa una scommessa.
+    track_reid_max_gap_frames: int = 5
+    # Distanza massima fra la posizione prevista del track sparito e quella del
+    # nuovo, espressa in frazioni della diagonale della bbox: in pixel assoluti
+    # sarebbe di nuovo dipendente dalla prospettiva.
+    track_reid_max_distance_scale: float = 0.8
+    # Due sagome di dimensione molto diversa non sono lo stesso veicolo.
+    track_reid_max_scale_ratio: float = 2.0
+
+    # (b) Avvicinamento impulsivo: su una coppia appena nata l'intensita
+    # sostituisce la persistenza. Un singolo frame con closing speed molto
+    # superiore alla soglia vale come avvicinamento sostenuto, perche
+    # `approach_confirmation_frames` non e soddisfacibile da una coppia che
+    # esiste da meno frame di quanti ne richiede.
+    #
+    # DEFAULT ON, ma l'evidenza e sottile e va letta prima di farci affidamento.
+    # Su 30 video stratificati recupera un vero positivo (t-bone notturno,
+    # coppia corretta, +0,60 s dall'annotazione) senza aggiungere nessun falso
+    # positivo: 1 -> 2 TP, 2 FP invariati. Sui 4 video di regressione non cambia
+    # un solo evento pur attivandosi 52 volte. Il totale resta pero di 2 TP su
+    # 30 video: e un miglioramento reale ma piccolo, misurato su un campione
+    # dove il sistema emette pochissimo.
+    #
+    # La sua sicurezza e in prestito. Sulle 159 righe in cui scatta, il 97%
+    # muore con la coppia in `status=clear` e solo il 7% ha contatto spaziale:
+    # a filtrare non e questa condizione ma la congiunzione con contatto, moto
+    # precedente ed evidenza dinamica. Se un intervento futuro indebolisce il
+    # requisito di contatto, questa scorciatoia va rimisurata insieme a quello.
+    impulse_approach_enabled: bool = True
+    # Quante volte la soglia ordinaria deve valere il closing speed di un
+    # singolo frame. Nei log un urto reale produce 16 px/f contro una soglia
+    # di 1,5: il margine e ampio e la soglia non e delicata.
+    impulse_approach_speed_multiplier: float = 4.0
+    # Una coppia e "giovane" finche e stata osservata per meno di questi frame.
+    # La scorciatoia vale solo li: su una coppia matura la persistenza e
+    # disponibile e va richiesta.
+    young_pair_max_frames: int = 3
+
+    # ------------------------------------------------------------------
+    # Punto 3: delta-V vettoriale
+    # ------------------------------------------------------------------
+    # `strong_deceleration_threshold` confronta la derivata della MAGNITUDINE
+    # della velocita, quindi non vede un urto che devia un veicolo senza
+    # rallentarlo: un t-bone a 90 gradi a modulo costante produce accelerazione
+    # scalare zero. Il delta-V |v(t) - v(t-1)| e la grandezza fisica giusta,
+    # quella che compare nella conservazione della quantita di moto, e viene
+    # usato come evidenza dinamica ACCANTO alla decelerazione, non al suo posto.
+    #
+    # Misurato sul delta-V grezzo: nella finestra dell'incidente la
+    # decelerazione scalare scatta su 4 campioni su 445, mentre |dv| >= 10 ne
+    # prende 30, di cui 26 (87%) invisibili alla derivata del modulo.
+    #
+    # DEFAULT ON. Su 30 video recupera un vero positivo - un t-bone in cui il
+    # delta-V e l'UNICA evidenza dinamica presente - senza aggiungere falsi
+    # positivi, e non cambia nulla sui 4 casi di regressione: 2 -> 3 TP, 2 FP
+    # invariati. Entrambi i TP recuperati fra punto 2b e punto 3 sono t-bone,
+    # cioe la classe cieca per costruzione alla derivata del modulo.
+    #
+    # Controindicazione misurata: il delta-V scatta anche sui falsi positivi
+    # esistenti e ne alza la confidenza (0,75 -> 0,90 su uno dei due). Non ne
+    # crea di nuovi, ma rende quelli che ci sono meno separabili da una futura
+    # soglia sul punteggio - cattiva notizia per il punto 5.
+    delta_v_evidence_enabled: bool = True
+    # Soglia in pixel/frame^2, tarata sulla distribuzione del delta-V grezzo e
+    # non su quella ricostruita dai log filtrati, che avrebbe dato un valore
+    # quasi doppio troppo basso. Il valore e il ginocchio della curva: fra 8 e
+    # 10 l'arricchimento nella finestra passa da 2,5x a 3,4x e poi si appiattisce
+    # attorno a 3,5x. Sotto i 10 si comprano campioni di fondo, sopra i 15 si
+    # perde meta del segnale senza guadagnare selettivita.
+    delta_v_impact_threshold_px: float = 10.0
+    # DEFAULT OFF, misurato dannoso. L'idea era buona - un bersaglio deviato da
+    # un t-bone ha delta-V alto ma spesso nessuna `trajectory_deflection`, che
+    # pretende velocita e spostamento di base minimi - ma annulla la protezione
+    # del punto 3.7 di PROJECT_STATUS: un veicolo che attraversa piu flussi ha
+    # delta-V alto su OGNI coppia prospettica, quindi la perturbazione smette di
+    # essere locale e torna a essere condivisa. Su `987C4_UdnJE_01` si torna
+    # esattamente ai 5 eventi di prima della correzione e la precision sui casi
+    # di regressione crolla da 0,60 a 0,38.
+    delta_v_crossing_disruption_enabled: bool = False
+
     # Se valorizzato, la pipeline salva diagnostica per coppia ed eventi in
     # JSON Lines, utilizzabile dal modulo src.calibration.
     calibration_log_path: str = ""

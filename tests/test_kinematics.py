@@ -4,6 +4,7 @@ import pytest
 
 from src.kinematics import (
     compute_acceleration,
+    compute_delta_v_px,
     compute_speed_px,
     compute_velocity_px,
     exponential_moving_average,
@@ -81,3 +82,26 @@ def test_update_stopped_counter_keeps_incrementing_at_threshold_boundary() -> No
     )
 
     assert counter == 2
+
+
+def test_delta_v_sees_a_deflection_that_the_scalar_derivative_misses() -> None:
+    """Il caso che motiva l'intera grandezza: un t-bone a modulo costante."""
+    before = (10.0, 0.0)
+    after = (0.0, 10.0)
+
+    # Stessa velocita scalare prima e dopo: la derivata del modulo e cieca.
+    assert compute_acceleration(
+        math.hypot(*after), math.hypot(*before)
+    ) == pytest.approx(0.0)
+    # Il delta-V vale invece v * sqrt(2), la firma dell'urto.
+    assert compute_delta_v_px(before, after) == pytest.approx(10.0 * math.sqrt(2))
+
+
+def test_delta_v_is_normalized_by_the_frame_gap() -> None:
+    assert compute_delta_v_px((0.0, 0.0), (6.0, 8.0), 2) == pytest.approx(5.0)
+
+
+def test_delta_v_without_a_previous_velocity_is_zero() -> None:
+    assert compute_delta_v_px(None, (3.0, 4.0)) == pytest.approx(0.0)
+    assert compute_delta_v_px((3.0, 4.0), None) == pytest.approx(0.0)
+    assert compute_delta_v_px((3.0, 4.0), (0.0, 0.0), 0) == pytest.approx(0.0)

@@ -18,8 +18,13 @@ dataset/
 *.mp4
 *.avi
 *.mkv
+# Output dei benchmark: una cartella per configurazione misurata, piu i log
+# testuali dei run. Sono voluminosi e rigenerabili.
 calibration/*.jsonl
+calibration/*.log
 calibration/real/
+calibration/sample_*/
+calibration/regr_*/
 # Uncomment the line below if you don't want to track YOLO weights
 *.pt
 

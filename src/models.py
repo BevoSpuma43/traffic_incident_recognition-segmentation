@@ -57,6 +57,9 @@ class TrackSample:
     # Scala apparente del veicolo (diagonale della bbox, filtrata): serve a
     # rendere le soglie cinematiche indipendenti dalla distanza dalla camera.
     scale_px: float = 0.0
+    # Modulo della variazione vettoriale di velocita fra questo campione e il
+    # precedente, calcolato sulla velocita NON filtrata.
+    delta_v_px: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,15 @@ class VehicleState:
     prev_motion_anchor: Point2D | None = None
     velocity_x_px: float = 0.0
     velocity_y_px: float = 0.0
+    # Velocita non filtrata dell'ultimo frame. Il filtro EMA serve a stimare la
+    # traiettoria abituale, ma smorza proprio il transitorio dell'impatto: per
+    # rilevarlo serve il dato grezzo, quindi il sistema mantiene entrambi.
+    raw_velocity_x_px: float = 0.0
+    raw_velocity_y_px: float = 0.0
+    # |Δv⃗| fra i due ultimi frame, sulla velocita grezza. E la firma fisica di
+    # un urto: a differenza dell'accelerazione scalare non si annulla quando il
+    # veicolo viene deviato senza cambiare modulo di velocita.
+    delta_v_px: float = 0.0
     kinematics_valid: bool = False
     observed_frames: int = 1
     confidence: float = 0.0
@@ -237,6 +249,8 @@ class CollisionEvent:
     overlap_ratio: float = 0.0
     spatial_distance_px: float = 0.0
     closing_speed_px: float = 0.0
+    # Delta-V massimo osservato sulla coppia durante l'episodio di contatto.
+    delta_v_px: float = 0.0
     confidence: float = 0.0
     first_contact_frame: int | None = None
     confirmation_frame: int | None = None
@@ -275,3 +289,17 @@ class PairDiagnostic:
     candidate_frames: int
     pair_status: str
     emitted: bool
+    # Campi del punto 2b, con default per restare compatibili con i log e con
+    # i costruttori posizionali gia esistenti.
+    # Numero di frame in cui la coppia e stata osservata: distingue una coppia
+    # matura da una nata nell'istante dell'urto.
+    pair_observed_frames: int = 0
+    # L'avvicinamento e stato accettato su un singolo frame molto intenso
+    # invece che sulla persistenza.
+    impulse_approach: bool = False
+    # Delta-V del frame corrente sui due track, e se supera la soglia d'impatto.
+    # Registrati sempre, anche quando il gate e disattivato: servono a misurare
+    # la distribuzione reale prima di tarare la soglia.
+    delta_v_a_px: float = 0.0
+    delta_v_b_px: float = 0.0
+    delta_v_impact: bool = False

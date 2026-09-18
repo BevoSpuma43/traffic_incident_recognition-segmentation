@@ -25,6 +25,7 @@ from src.geometry import compute_centroid_from_polygon
 from src.kinematics import (
     compute_acceleration,
     compute_bbox_scale_px,
+    compute_delta_v_px,
     compute_velocity_px,
     exponential_moving_average,
     update_stopped_counter,
@@ -77,6 +78,17 @@ class VehicleStateStore:
         )
         self._reference_fps = max(1e-6, float(getattr(config, "reference_fps", 15.0)))
         self._video_fps = max(0.0, float(getattr(config, "video_fps", 0.0)))
+        # Re-identificazione dopo un cambio di ID (punto 2b).
+        self._reid_enabled = bool(getattr(config, "track_reid_enabled", False))
+        self._reid_max_gap = max(
+            1, int(getattr(config, "track_reid_max_gap_frames", 5))
+        )
+        self._reid_max_distance_scale = max(
+            0.0, float(getattr(config, "track_reid_max_distance_scale", 0.8))
+        )
+        self._reid_max_scale_ratio = max(
+            1.0, float(getattr(config, "track_reid_max_scale_ratio", 2.0))
+        )
 
     # ------------------------------------------------------------------
     # Interfaccia pubblica
@@ -127,6 +139,11 @@ class VehicleStateStore:
             if previous is None or detection.confidence > previous.confidence:
                 detections_by_id[detection.track_id] = detection
 
+        # Un track presente in questo frame non puo essere donatore di storia:
+        # il suo ID non e sparito, quindi non c'e nessuna riassegnazione.
+        active_ids = set(detections_by_id)
+        inherited_ids: set[int] = set()
+
         for detection in detections_by_id.values():
             # I track senza ID assegnato da ByteTrack (es. primo frame
             # o detection momentaneamente non associate) vengono scartati.
@@ -138,6 +155,18 @@ class VehicleStateStore:
             # Tenta prima dai momenti del poligono, poi dalla bbox come fallback.
             centroid: Point2D = self._compute_detection_centroid(detection)
             motion_anchor = self._compute_motion_anchor(detection, centroid)
+
+            if track_id not in self._states:
+                donor_id = self._find_reid_donor(
+                    detection=detection,
+                    motion_anchor=motion_anchor,
+                    frame_index=frame_index,
+                    active_ids=active_ids,
+                    inherited_ids=inherited_ids,
+                )
+                if donor_id is not None:
+                    inherited_ids.add(donor_id)
+                    self._inherit_track_history(donor_id, track_id)
 
             if track_id in self._states:
                 # --- Aggiornamento di un track già noto ---
@@ -239,6 +268,10 @@ class VehicleStateStore:
         previous_centroid: Point2D | None = state.centroid
         previous_anchor: Point2D | None = state.motion_anchor or state.centroid
         previous_speed_px: float = state.speed_px
+        # Letto prima di sovrascriverlo: un delta-V ha senso solo fra due frame
+        # entrambi misurati, altrimenti il primo campione varrebbe l'intera
+        # velocita e ogni track nuovo sembrerebbe appena stato urtato.
+        previous_kinematics_valid: bool = state.kinematics_valid
         frame_delta = frame_index - state.last_seen_frame
         kinematics_valid = 0 < frame_delta <= self._max_kinematic_gap
 
@@ -259,11 +292,25 @@ class VehicleStateStore:
             acceleration_px = compute_acceleration(
                 speed_px, previous_speed_px, frame_delta
             )
+            # Il delta-V usa la velocita grezza: l'EMA e tarato per stabilizzare
+            # la traiettoria e smorzerebbe proprio il picco da rilevare.
+            delta_v_px = (
+                compute_delta_v_px(
+                    (state.raw_velocity_x_px, state.raw_velocity_y_px),
+                    (raw_vx, raw_vy),
+                    frame_delta,
+                )
+                if previous_kinematics_valid
+                else 0.0
+            )
         else:
+            raw_vx = 0.0
+            raw_vy = 0.0
             velocity_x = 0.0
             velocity_y = 0.0
             speed_px = 0.0
             acceleration_px = 0.0
+            delta_v_px = 0.0
 
         scale_px = self._smoothed_scale(detection, state.scale_px)
 
@@ -289,6 +336,9 @@ class VehicleStateStore:
         state.acceleration_px = acceleration_px
         state.velocity_x_px = velocity_x
         state.velocity_y_px = velocity_y
+        state.raw_velocity_x_px = raw_vx
+        state.raw_velocity_y_px = raw_vy
+        state.delta_v_px = delta_v_px
         state.kinematics_valid = kinematics_valid
         state.observed_frames += 1
         state.confidence = detection.confidence
@@ -301,6 +351,82 @@ class VehicleStateStore:
         state.stopped_frames = stopped_frames
         state.scale_px = scale_px
         state.history.append(self._build_sample(state, frame_index))
+
+    def _find_reid_donor(
+        self,
+        *,
+        detection: DetectionResult,
+        motion_anchor: Point2D,
+        frame_index: int,
+        active_ids: set[int],
+        inherited_ids: set[int],
+    ) -> int | None:
+        """Cerca il track sparito da cui questo nuovo ID puo ereditare la storia.
+
+        Quando due sagome si occludono durante un urto ByteTrack perde
+        l'associazione e riassegna un ID nuovo: il veicolo e lo stesso, ma per
+        la pipeline nasce in quel momento e tutta la cinematica pre-impatto
+        sparisce proprio nel frame in cui servirebbe. Qui l'ID nuovo viene
+        ricollegato al track sparito piu compatibile, se ne esiste uno solo
+        plausibile per posizione prevista e dimensione.
+
+        Returns
+        -------
+        int | None
+            ID del track donatore, oppure None se nessun candidato e
+            sufficientemente vicino.
+        """
+        if not self._reid_enabled:
+            return None
+        scale_px = compute_bbox_scale_px(detection.bbox)
+        if scale_px <= 0.0:
+            return None
+
+        best_id: int | None = None
+        best_distance = float("inf")
+        for candidate_id, state in self._states.items():
+            if candidate_id in active_ids or candidate_id in inherited_ids:
+                continue
+            gap_frames = frame_index - state.last_seen_frame
+            if gap_frames <= 0 or gap_frames > self._reid_max_gap:
+                continue
+            anchor = state.motion_anchor or state.centroid
+            if anchor is None:
+                continue
+            # Posizione attesa se il veicolo avesse proseguito col suo moto:
+            # durante un urto la velocita cambia, ma su 1-5 frame l'estrapolazione
+            # resta molto piu vicina del salto che separa due veicoli distinti.
+            predicted_x = float(anchor.x) + state.velocity_x_px * gap_frames
+            predicted_y = float(anchor.y) + state.velocity_y_px * gap_frames
+            distance = (
+                (float(motion_anchor.x) - predicted_x) ** 2
+                + (float(motion_anchor.y) - predicted_y) ** 2
+            ) ** 0.5
+            reference_scale = max(scale_px, state.scale_px)
+            if distance > self._reid_max_distance_scale * reference_scale:
+                continue
+            if state.scale_px > 0.0:
+                ratio = max(
+                    scale_px / state.scale_px, state.scale_px / scale_px
+                )
+                if ratio > self._reid_max_scale_ratio:
+                    continue
+            if distance < best_distance:
+                best_id = candidate_id
+                best_distance = distance
+        return best_id
+
+    def _inherit_track_history(self, donor_id: int, track_id: int) -> None:
+        """Sposta lo stato del track sparito sotto il nuovo ID.
+
+        Riusare lo stato invece di copiarne i campi fa si che il frame
+        successivo passi dal normale ``_update_existing_state``: velocita,
+        accelerazione e validita cinematica vengono calcolate sullo
+        spostamento reale attraverso il cambio di ID, non ricostruite a mano.
+        """
+        state = self._states.pop(donor_id)
+        state.track_id = track_id
+        self._states[track_id] = state
 
     def _build_new_state(
         self,
@@ -417,6 +543,7 @@ class VehicleStateStore:
             acceleration_px=state.acceleration_px,
             mask_area=mask_area,
             scale_px=state.scale_px,
+            delta_v_px=state.delta_v_px,
         )
 
     def _compute_detection_centroid(self, detection: DetectionResult) -> Point2D:

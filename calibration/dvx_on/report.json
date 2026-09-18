@@ -1,0 +1,314 @@
+{
+  "selection": {
+    "metadata": "dataset/metadata-real.csv",
+    "dataset_root": "dataset",
+    "model": "yolo26n-seg.pt",
+    "split_field": null,
+    "split": null,
+    "types": [],
+    "videos": [
+      "95Tx-2p0O_E_00.mp4",
+      "987C4_UdnJE_01.mp4",
+      "D1eP4Bn4hDQ_0_00.mp4",
+      "8G56ILxFFNM_00.mp4",
+      "7Nc9tJ7R4KY_00.mp4"
+    ],
+    "config_overrides": {
+      "delta_v_crossing_disruption_enabled": true
+    },
+    "selected_videos": 5,
+    "completed_videos": 5
+  },
+  "ground_truth": {
+    "annotated_videos": 5,
+    "accident_types": {
+      "head-on": 1,
+      "rear-end": 1,
+      "sideswipe": 1,
+      "t-bone": 2
+    },
+    "metadata_average_fps": {
+      "min": 14.720608852393351,
+      "median": 20.121951219512194,
+      "p90": 20.859813474015205,
+      "max": 23.379478598897602
+    },
+    "frame_timestamp_error_seconds": {
+      "min": 0.010852348993288352,
+      "median": 0.11319727891156539,
+      "p90": 0.1729019737373747,
+      "max": 0.7172941317204309
+    },
+    "out_of_range_accident_frames": 0
+  },
+  "diagnostics": {
+    "frame_rows": 1561,
+    "frames_with_detections": 1561,
+    "frames_with_multiple_tracks": 1561,
+    "max_active_tracks": 14,
+    "track_rows": 12866,
+    "unique_track_ids": 158,
+    "diagnostic_rows": 49857,
+    "preexisting_contact_rows": 359,
+    "contact_rows": 3475,
+    "emitted_rows": 9,
+    "contact_overlap_ratio": {
+      "min": 0.0,
+      "median": 0.0012733446519524619,
+      "p90": 0.020171149144254278,
+      "max": 1.0
+    },
+    "contact_closing_speed_px": {
+      "min": 0.0,
+      "median": 0.0,
+      "p90": 0.6060574419524462,
+      "max": 55.338308612165385
+    },
+    "contact_spatial_distance_px": {
+      "min": 0.0,
+      "median": 0.0,
+      "p90": 0.0,
+      "max": 3.0
+    }
+  },
+  "performance": {
+    "processed_frames": 1561,
+    "elapsed_seconds": 138.80944249988534,
+    "processing_seconds": 138.44498979998752,
+    "end_to_end_fps": 11.245632659329278,
+    "processing_fps": 11.275236483856787,
+    "video_duration_seconds": 81.383747,
+    "end_to_end_realtime_factor": 0.5862983492644401,
+    "processing_realtime_factor": 0.5878417638484115
+  },
+  "evaluation": {
+    "evaluated_videos": 5,
+    "true_positives": 4,
+    "false_positives": 5,
+    "false_negatives": 1,
+    "precision": 0.4444444444444444,
+    "recall": 0.8,
+    "f1": 0.5714285714285714,
+    "mean_delay_frames": 0.0,
+    "median_delay_frames": 2.5,
+    "mean_delay_seconds": 0.01525008333333322,
+    "median_delay_seconds": 0.10400016666666634
+  },
+  "by_group": {
+    "label": {
+      "head-on": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 0,
+        "mean_delay_seconds": -0.0003333333333337407,
+        "median_delay_seconds": -0.0003333333333337407
+      },
+      "rear-end": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": 5.0,
+        "median_delay_frames": 5,
+        "mean_delay_seconds": 0.3330000000000002,
+        "median_delay_seconds": 0.3330000000000002
+      },
+      "sideswipe": {
+        "evaluated_videos": 1,
+        "true_positives": 0,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 0.0,
+        "mean_delay_seconds": 0.0,
+        "median_delay_seconds": 0.0
+      },
+      "t-bone": {
+        "evaluated_videos": 2,
+        "true_positives": 2,
+        "false_positives": 4,
+        "false_negatives": 0,
+        "precision": 0.3333333333333333,
+        "recall": 1.0,
+        "f1": 0.5,
+        "mean_delay_frames": -2.5,
+        "median_delay_frames": -2.5,
+        "mean_delay_seconds": -0.13583316666666678,
+        "median_delay_seconds": -0.13583316666666678
+      }
+    },
+    "rollover": {
+      "False": {
+        "evaluated_videos": 5,
+        "true_positives": 4,
+        "false_positives": 5,
+        "false_negatives": 1,
+        "precision": 0.4444444444444444,
+        "recall": 0.8,
+        "f1": 0.5714285714285714,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 2.5,
+        "mean_delay_seconds": 0.01525008333333322,
+        "median_delay_seconds": 0.10400016666666634
+      }
+    },
+    "scene_layout": {
+      "signalized_intersection": {
+        "evaluated_videos": 5,
+        "true_positives": 4,
+        "false_positives": 5,
+        "false_negatives": 1,
+        "precision": 0.4444444444444444,
+        "recall": 0.8,
+        "f1": 0.5714285714285714,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 2.5,
+        "mean_delay_seconds": 0.01525008333333322,
+        "median_delay_seconds": 0.10400016666666634
+      }
+    },
+    "weather": {
+      "normal": {
+        "evaluated_videos": 5,
+        "true_positives": 4,
+        "false_positives": 5,
+        "false_negatives": 1,
+        "precision": 0.4444444444444444,
+        "recall": 0.8,
+        "f1": 0.5714285714285714,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 2.5,
+        "mean_delay_seconds": 0.01525008333333322,
+        "median_delay_seconds": 0.10400016666666634
+      }
+    },
+    "day_time": {
+      "day": {
+        "evaluated_videos": 5,
+        "true_positives": 4,
+        "false_positives": 5,
+        "false_negatives": 1,
+        "precision": 0.4444444444444444,
+        "recall": 0.8,
+        "f1": 0.5714285714285714,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 2.5,
+        "mean_delay_seconds": 0.01525008333333322,
+        "median_delay_seconds": 0.10400016666666634
+      }
+    },
+    "quality": {
+      "Fine": {
+        "evaluated_videos": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 0,
+        "mean_delay_seconds": -0.0003333333333337407,
+        "median_delay_seconds": -0.0003333333333337407
+      },
+      "Good": {
+        "evaluated_videos": 4,
+        "true_positives": 3,
+        "false_positives": 5,
+        "false_negatives": 1,
+        "precision": 0.375,
+        "recall": 0.75,
+        "f1": 0.5,
+        "mean_delay_frames": 0.0,
+        "median_delay_frames": 5,
+        "mean_delay_seconds": 0.02044455555555554,
+        "median_delay_seconds": 0.20833366666666642
+      }
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\8G56ILxFFNM_00.mp4",
+      "label": "sideswipe",
+      "accident_frame": 262,
+      "processed_frames": 496,
+      "event_count": 1,
+      "decoder_fps": 23.38861788617886,
+      "elapsed_seconds": 43.42482590000145,
+      "startup_seconds": 0.11568149994127452,
+      "processing_seconds": 43.30914440006018,
+      "processing_fps": 11.452546728198833
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\7Nc9tJ7R4KY_00.mp4",
+      "label": "head-on",
+      "accident_frame": 83,
+      "processed_frames": 150,
+      "event_count": 1,
+      "decoder_fps": 19.88950276243094,
+      "elapsed_seconds": 12.371990900021046,
+      "startup_seconds": 0.06468149996362627,
+      "processing_seconds": 12.30730940005742,
+      "processing_fps": 12.18787918009928
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\D1eP4Bn4hDQ_0_00.mp4",
+      "label": "t-bone",
+      "accident_frame": 121,
+      "processed_frames": 373,
+      "event_count": 1,
+      "decoder_fps": 20.81860465116279,
+      "elapsed_seconds": 33.70043019996956,
+      "startup_seconds": 0.05592640000395477,
+      "processing_seconds": 33.644503799965605,
+      "processing_fps": 11.086506200765585
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\95Tx-2p0O_E_00.mp4",
+      "label": "rear-end",
+      "accident_frame": 194,
+      "processed_frames": 442,
+      "event_count": 1,
+      "decoder_fps": 14.753824756606397,
+      "elapsed_seconds": 40.53546729986556,
+      "startup_seconds": 0.06692739995196462,
+      "processing_seconds": 40.468539899913594,
+      "processing_fps": 10.922064425678569
+    },
+    {
+      "kind": "run",
+      "completed": true,
+      "video_path": "C:\\Users\\AndreaBrogiVectionTe\\Python_Project\\traffic_incident_recognition-segmentation\\dataset\\real_videos\\987C4_UdnJE_01.mp4",
+      "label": "t-bone",
+      "accident_frame": 39,
+      "processed_frames": 100,
+      "event_count": 5,
+      "decoder_fps": 20.161290322580644,
+      "elapsed_seconds": 8.77672820002772,
+      "startup_seconds": 0.06123590003699064,
+      "processing_seconds": 8.715492299990728,
+      "processing_fps": 11.473821163275696
+    }
+  ]
+}

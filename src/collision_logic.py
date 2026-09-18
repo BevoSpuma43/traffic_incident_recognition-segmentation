@@ -30,6 +30,10 @@ class _PairState:
 
     status: str = "clear"
     last_seen_frame: int = -1
+    # Quante volte la coppia e stata osservata da quando esiste. Non viene mai
+    # azzerato da reset_candidate: serve a distinguere una coppia matura da una
+    # nata nell'istante dell'urto, che non ha storia su cui applicare i gate.
+    observed_frames: int = 0
     first_contact_frame: int | None = None
     last_contact_frame: int | None = None
     last_dynamic_frame: int | None = None
@@ -38,12 +42,20 @@ class _PairState:
     candidate_frames: int = 0
     cooldown_until: int = -1
     saw_hard_deceleration: bool = False
+    saw_delta_v_impact: bool = False
+    max_delta_v_px: float = 0.0
+    # Delta-V massimo osservato DENTRO l'episodio di contatto di questa coppia.
+    # Distinto da max_delta_v_px, che segue la finestra dell'evidenza dinamica:
+    # questo misura quanto e stata perturbata la coppia mentre si toccava, ed e
+    # la statistica su cui le coppie che condividono un track si confrontano.
+    contact_delta_v_px: float = 0.0
     saw_dual_stop: bool = False
     saw_stop_transition: bool = False
     saw_trajectory_deflection: bool = False
     saw_target_impulse: bool = False
     saw_occlusion_bridge: bool = False
     sustained_approach: bool = False
+    saw_impulse_approach: bool = False
     reaction_frames: int = 0
     last_crossing_approach_frame: int | None = None
     last_observation_gap_frame: int | None = None
@@ -62,12 +74,15 @@ class _PairState:
         previous_closing_speed = self.max_closing_speed_px
         previous_dynamic = self.last_dynamic_frame
         previous_hard_deceleration = self.saw_hard_deceleration
+        previous_delta_v_impact = self.saw_delta_v_impact
+        previous_max_delta_v = self.max_delta_v_px
         previous_dual_stop = self.saw_dual_stop
         previous_stop_transition = self.saw_stop_transition
         previous_trajectory_deflection = self.saw_trajectory_deflection
         previous_target_impulse = self.saw_target_impulse
         previous_occlusion_bridge = self.saw_occlusion_bridge
         previous_sustained_approach = self.sustained_approach
+        previous_impulse_approach = self.saw_impulse_approach
         previous_reaction_frames = self.reaction_frames
         previous_crossing_approach = self.last_crossing_approach_frame
         previous_gap_frame = self.last_observation_gap_frame
@@ -80,12 +95,16 @@ class _PairState:
         self.approach_frames = 0
         self.candidate_frames = 0
         self.saw_hard_deceleration = False
+        self.saw_delta_v_impact = False
+        self.max_delta_v_px = 0.0
+        self.contact_delta_v_px = 0.0
         self.saw_dual_stop = False
         self.saw_stop_transition = False
         self.saw_trajectory_deflection = False
         self.saw_target_impulse = False
         self.saw_occlusion_bridge = False
         self.sustained_approach = False
+        self.saw_impulse_approach = False
         self.reaction_frames = 0
         self.last_crossing_approach_frame = None
         self.last_observation_gap_frame = None
@@ -100,12 +119,15 @@ class _PairState:
             self.max_closing_speed_px = previous_closing_speed
             self.last_dynamic_frame = previous_dynamic
             self.saw_hard_deceleration = previous_hard_deceleration
+            self.saw_delta_v_impact = previous_delta_v_impact
+            self.max_delta_v_px = previous_max_delta_v
             self.saw_dual_stop = previous_dual_stop
             self.saw_stop_transition = previous_stop_transition
             self.saw_trajectory_deflection = previous_trajectory_deflection
             self.saw_target_impulse = previous_target_impulse
             self.saw_occlusion_bridge = previous_occlusion_bridge
             self.sustained_approach = previous_sustained_approach
+            self.saw_impulse_approach = previous_impulse_approach
             self.reaction_frames = previous_reaction_frames
             self.last_crossing_approach_frame = previous_crossing_approach
             self.last_observation_gap_frame = previous_gap_frame
@@ -150,6 +172,12 @@ class CollisionDetector:
         preexisting_contact_release_frames: int = 3,
         preexisting_contact_max_track_age_frames: int = 10,
         preexisting_contact_max_frames: int = 45,
+        impulse_approach_enabled: bool = True,
+        impulse_approach_speed_multiplier: float = 4.0,
+        young_pair_max_frames: int = 3,
+        delta_v_evidence_enabled: bool = True,
+        delta_v_impact_threshold_px: float = 10.0,
+        delta_v_crossing_disruption_enabled: bool = False,
         kinematic_normalization_enabled: bool = False,
         normalize_time_windows: bool = False,
         reference_scale_px: float = 90.0,
@@ -217,6 +245,18 @@ class CollisionDetector:
         )
         self.preexisting_contact_max_frames = max(
             0, int(preexisting_contact_max_frames)
+        )
+        self.impulse_approach_enabled = bool(impulse_approach_enabled)
+        self.impulse_approach_speed_multiplier = max(
+            1.0, float(impulse_approach_speed_multiplier)
+        )
+        self.young_pair_max_frames = max(0, int(young_pair_max_frames))
+        self.delta_v_evidence_enabled = bool(delta_v_evidence_enabled)
+        self.delta_v_impact_threshold_px = max(
+            0.0, float(delta_v_impact_threshold_px)
+        )
+        self.delta_v_crossing_disruption_enabled = bool(
+            delta_v_crossing_disruption_enabled
         )
         self.kinematic_normalization_enabled = bool(
             kinematic_normalization_enabled
@@ -295,6 +335,16 @@ class CollisionDetector:
             preexisting_contact_max_frames=(
                 config.preexisting_contact_max_frames
             ),
+            impulse_approach_enabled=config.impulse_approach_enabled,
+            impulse_approach_speed_multiplier=(
+                config.impulse_approach_speed_multiplier
+            ),
+            young_pair_max_frames=config.young_pair_max_frames,
+            delta_v_evidence_enabled=config.delta_v_evidence_enabled,
+            delta_v_impact_threshold_px=config.delta_v_impact_threshold_px,
+            delta_v_crossing_disruption_enabled=(
+                config.delta_v_crossing_disruption_enabled
+            ),
             kinematic_normalization_enabled=(
                 config.kinematic_normalization_enabled
             ),
@@ -320,6 +370,11 @@ class CollisionDetector:
         collisions: list[CollisionEvent] = []
         seen_pairs: set[tuple[int, int]] = set()
 
+        # Prima fase: aggiorna lo stato di ogni coppia e misura l'evidenza
+        # spaziale. E separata dalla decisione perche il delta-V usato come
+        # perturbazione fra traiettorie incrociate va confrontato FRA le coppie
+        # che condividono un track, e un ciclo per-coppia non puo farlo.
+        pending: list[tuple[tuple[int, int], VehicleState, VehicleState, bool, _SpatialEvidence]] = []
         for index, vehicle_a in enumerate(states):
             for vehicle_b in states[index + 1 :]:
                 if vehicle_a.track_id == vehicle_b.track_id:
@@ -333,6 +388,7 @@ class CollisionDetector:
                 pair_state = self._pair_states.setdefault(pair, _PairState())
                 previous_pair_frame = pair_state.last_seen_frame
                 pair_state.last_seen_frame = frame_index
+                pair_state.observed_frames += 1
                 if (
                     previous_pair_frame >= 0
                     and frame_index - previous_pair_frame > 1
@@ -350,310 +406,110 @@ class CollisionDetector:
                 self._expire_temporal_evidence(pair_state, frame_index)
 
                 spatial = self._spatial_evidence(vehicle_a, vehicle_b)
-                closing_speed = self._closing_speed(vehicle_a, vehicle_b)
-                hard_deceleration = self._hard_deceleration(vehicle_a, vehicle_b)
-                dual_stop = self._both_stopped(vehicle_a, vehicle_b)
-                stop_transition = self._recent_stop_transition(
-                    vehicle_a, frame_index
-                ) or self._recent_stop_transition(vehicle_b, frame_index)
-                had_motion = self._had_recent_motion(
-                    vehicle_a, frame_index
-                ) or self._had_recent_motion(vehicle_b, frame_index)
-                stationary_role = self._stationary_target_and_mover(
-                    vehicle_a, vehicle_b, frame_index
+                self._track_contact_episode_delta_v(
+                    pair_state, spatial, vehicle_a, vehicle_b, frame_index
                 )
-                deflection_a = self._trajectory_deflection(
-                    vehicle_a, frame_index
+                pending.append(
+                    (pair, vehicle_a, vehicle_b, is_new_pair, spatial)
                 )
-                deflection_b = self._trajectory_deflection(
-                    vehicle_b, frame_index
-                )
-                crossing_trajectories = self._crossing_trajectories(
-                    vehicle_a, vehicle_b, frame_index
-                )
-                target_impulse = self._target_impulse(vehicle_a, vehicle_b)
-                moving_vehicle_reaction = False
-                trajectory_deflection = False
-                if stationary_role is not None:
-                    mover, _ = stationary_role
-                    mover_hard_deceleration = self._vehicle_hard_deceleration(
-                        mover
-                    )
-                    mover_stop_transition = self._recent_stop_transition(
-                        mover, frame_index
-                    )
-                    trajectory_deflection = (
-                        deflection_a if mover is vehicle_a else deflection_b
-                    )
-                    moving_vehicle_reaction = (
-                        mover_hard_deceleration
-                        or mover_stop_transition
-                        or trajectory_deflection
-                    )
-                    # In una coppia veicolo-in-moto/bersaglio-fermo, rumore
-                    # cinematico del bersaglio non e una reazione d'impatto.
-                    hard_deceleration = mover_hard_deceleration
-                    stop_transition = mover_stop_transition
 
-                contact_context = spatial.contact or self._is_recent(
-                    pair_state.last_contact_frame, frame_index
+        delta_v_winners = self._delta_v_crossing_winners(pending)
+
+        # Seconda fase: la decisione vera e propria, su evidenze gia misurate.
+        for pair, vehicle_a, vehicle_b, is_new_pair, spatial in pending:
+            pair_state = self._pair_states[pair]
+            closing_speed = self._closing_speed(vehicle_a, vehicle_b)
+            hard_deceleration = self._hard_deceleration(vehicle_a, vehicle_b)
+            delta_v_impact = self._delta_v_impact(vehicle_a, vehicle_b)
+            # Registrati sempre, anche a gate spento: sono la materia prima
+            # per tarare la soglia sulla distribuzione reale invece che a
+            # occhio, e non costano nulla se non vengono letti.
+            delta_v_a = (
+                vehicle_a.delta_v_px if vehicle_a.kinematics_valid else 0.0
+            )
+            delta_v_b = (
+                vehicle_b.delta_v_px if vehicle_b.kinematics_valid else 0.0
+            )
+            pair_state.max_delta_v_px = max(
+                pair_state.max_delta_v_px, delta_v_a, delta_v_b
+            )
+            dual_stop = self._both_stopped(vehicle_a, vehicle_b)
+            stop_transition = self._recent_stop_transition(
+                vehicle_a, frame_index
+            ) or self._recent_stop_transition(vehicle_b, frame_index)
+            had_motion = self._had_recent_motion(
+                vehicle_a, frame_index
+            ) or self._had_recent_motion(vehicle_b, frame_index)
+            stationary_role = self._stationary_target_and_mover(
+                vehicle_a, vehicle_b, frame_index
+            )
+            deflection_a = self._trajectory_deflection(
+                vehicle_a, frame_index
+            )
+            deflection_b = self._trajectory_deflection(
+                vehicle_b, frame_index
+            )
+            crossing_trajectories = self._crossing_trajectories(
+                vehicle_a, vehicle_b, frame_index
+            )
+            target_impulse = self._target_impulse(vehicle_a, vehicle_b)
+            moving_vehicle_reaction = False
+            trajectory_deflection = False
+            if stationary_role is not None:
+                mover, _ = stationary_role
+                mover_hard_deceleration = self._vehicle_hard_deceleration(
+                    mover
                 )
-                if stationary_role is not None and contact_context:
-                    if moving_vehicle_reaction:
-                        pair_state.reaction_frames += 1
-                    else:
-                        pair_state.reaction_frames = 0
+                mover_stop_transition = self._recent_stop_transition(
+                    mover, frame_index
+                )
+                mover_delta_v_impact = self._vehicle_delta_v_impact(mover)
+                trajectory_deflection = (
+                    deflection_a if mover is vehicle_a else deflection_b
+                )
+                moving_vehicle_reaction = (
+                    mover_hard_deceleration
+                    or mover_stop_transition
+                    or mover_delta_v_impact
+                    or trajectory_deflection
+                )
+                # In una coppia veicolo-in-moto/bersaglio-fermo, rumore
+                # cinematico del bersaglio non e una reazione d'impatto.
+                hard_deceleration = mover_hard_deceleration
+                stop_transition = mover_stop_transition
+                delta_v_impact = mover_delta_v_impact
+
+            contact_context = spatial.contact or self._is_recent(
+                pair_state.last_contact_frame, frame_index
+            )
+            if stationary_role is not None and contact_context:
+                if moving_vehicle_reaction:
+                    pair_state.reaction_frames += 1
                 else:
                     pair_state.reaction_frames = 0
+            else:
+                pair_state.reaction_frames = 0
 
-                if (
-                    is_new_pair
-                    and spatial.contact
-                    and self.preexisting_contact_release_frames > 0
-                    and self._both_tracks_are_new(vehicle_a, vehicle_b)
-                ):
-                    pair_state.preexisting_contact = True
-                    pair_state.status = "preexisting_contact"
+            if (
+                is_new_pair
+                and spatial.contact
+                and self.preexisting_contact_release_frames > 0
+                and self._both_tracks_are_new(vehicle_a, vehicle_b)
+            ):
+                pair_state.preexisting_contact = True
+                pair_state.status = "preexisting_contact"
 
-                if pair_state.preexisting_contact:
-                    pair_state.preexisting_frames += 1
-                    if spatial.contact:
-                        pair_state.separation_frames = 0
-                    else:
-                        pair_state.separation_frames += 1
-                    if self._preexisting_contact_is_released(pair_state):
-                        pair_state.preexisting_contact = False
-                        pair_state.separation_frames = 0
-                        pair_state.preexisting_frames = 0
-                        pair_state.reset_candidate()
-
-                    self._record_diagnostic(
-                        frame_index=frame_index,
-                        pair=pair,
-                        pair_state=pair_state,
-                        spatial=spatial,
-                        closing_speed=closing_speed,
-                        hard_deceleration=hard_deceleration,
-                        dual_stop=dual_stop,
-                        stop_transition=stop_transition,
-                        had_motion=had_motion,
-                        stationary_target=stationary_role is not None,
-                        moving_vehicle_reaction=moving_vehicle_reaction,
-                        trajectory_deflection=trajectory_deflection,
-                        crossing_trajectories=crossing_trajectories,
-                        target_impulse=target_impulse,
-                        bridged_dual_stop=False,
-                        bridged_strong_impact=False,
-                        emitted=False,
-                    )
-                    continue
-
+            if pair_state.preexisting_contact:
+                pair_state.preexisting_frames += 1
                 if spatial.contact:
-                    if pair_state.first_contact_frame is None:
-                        pair_state.first_contact_frame = frame_index
-                    pair_state.last_contact_frame = frame_index
-                    pair_state.max_overlap_area = max(
-                        pair_state.max_overlap_area, spatial.overlap_area
-                    )
-                    pair_state.max_overlap_ratio = max(
-                        pair_state.max_overlap_ratio, spatial.overlap_ratio
-                    )
-                    pair_state.min_distance_px = min(
-                        pair_state.min_distance_px, spatial.distance_px
-                    )
-
-                if closing_speed >= self._pair_speed_threshold(
-                    self.min_closing_speed_px, vehicle_a, vehicle_b
-                ):
-                    pair_state.approach_frames += 1
-                    pair_state.max_closing_speed_px = max(
-                        pair_state.max_closing_speed_px, closing_speed
-                    )
-                    if pair_state.approach_frames >= self._window(
-                        self.approach_confirmation_frames
-                    ):
-                        pair_state.last_approach_frame = frame_index
-                        pair_state.sustained_approach = True
-                        if crossing_trajectories:
-                            pair_state.last_crossing_approach_frame = frame_index
+                    pair_state.separation_frames = 0
                 else:
-                    pair_state.approach_frames = 0
-
-                dynamic_evidence = (
-                    moving_vehicle_reaction
-                    if stationary_role is not None
-                    else hard_deceleration
-                    or stop_transition
-                    or (dual_stop and had_motion)
-                    or target_impulse
-                )
-                if dynamic_evidence:
-                    pair_state.last_dynamic_frame = frame_index
-                    pair_state.saw_hard_deceleration |= hard_deceleration
-                    pair_state.saw_stop_transition |= stop_transition
-                    pair_state.saw_dual_stop |= dual_stop
-                    pair_state.saw_trajectory_deflection |= trajectory_deflection
-                    pair_state.saw_target_impulse |= target_impulse
-
-                has_recent_contact = self._is_recent(
-                    pair_state.last_contact_frame, frame_index
-                )
-                has_recent_dynamic = self._is_recent(
-                    pair_state.last_dynamic_frame, frame_index
-                )
-                has_recent_approach = self._is_approach_recent(
-                    pair_state.last_approach_frame, frame_index
-                )
-                strong_overlap = pair_state.max_overlap_ratio >= max(
-                    0.05, self.mask_overlap_ratio_threshold * 2.0
-                )
-                bridge_frames = self._window(self.crossing_dual_stop_bridge_frames)
-                min_gap_frames = self._window(self.crossing_dual_stop_min_gap_frames)
-                recent_observation_gap = (
-                    pair_state.last_observation_gap_frame is not None
-                    and 0
-                    <= frame_index - pair_state.last_observation_gap_frame
-                    <= bridge_frames
-                    and pair_state.observation_gap_frames >= min_gap_frames
-                )
-                contact_age = self._contact_age(pair_state, frame_index)
-                max_contact_age = self._window(
-                    self.max_contact_candidate_age_frames
-                )
-                fresh_contact = (
-                    max_contact_age == 0 or contact_age <= max_contact_age
-                )
-                confirmed_moving_reaction = (
-                    pair_state.reaction_frames
-                    >= self._window(self.impact_reaction_confirmation_frames)
-                )
-                late_stationary_impact = (
-                    stationary_role is not None
-                    and pair_state.sustained_approach
-                    and confirmed_moving_reaction
-                    and trajectory_deflection
-                )
-                reaction_is_valid = (
-                    stationary_role is None or confirmed_moving_reaction
-                )
-                crossing_disruption = (
-                    target_impulse or deflection_a or deflection_b
-                )
-                recent_crossing_approach = self._is_crossing_approach_recent(
-                    pair_state.last_crossing_approach_frame, frame_index
-                )
-                crossing_context = (
-                    crossing_trajectories or recent_crossing_approach
-                )
-                bridged_dual_stop = (
-                    spatial.contact
-                    and spatial.overlap_area > 0
-                    and dual_stop
-                    and had_motion
-                    and recent_crossing_approach
-                    and pair_state.last_crossing_approach_frame is not None
-                    and pair_state.last_observation_gap_frame is not None
-                    and pair_state.last_observation_gap_frame
-                    > pair_state.last_crossing_approach_frame
-                    and pair_state.observation_gap_frames >= min_gap_frames
-                    and 0
-                    <= frame_index - pair_state.last_observation_gap_frame
-                    <= bridge_frames
-                )
-                bridged_strong_impact = (
-                    spatial.contact
-                    and spatial.overlap_area > 0
-                    and strong_overlap
-                    and had_motion
-                    and pair_state.sustained_approach
-                    and recent_observation_gap
-                    and (
-                        pair_state.saw_hard_deceleration
-                        or crossing_disruption
-                    )
-                )
-                crossing_evidence_is_valid = (
-                    not crossing_context
-                    or crossing_disruption
-                    or bridged_dual_stop
-                    or bridged_strong_impact
-                )
-                closing_speed_threshold = self._pair_speed_threshold(
-                    self.min_closing_speed_px, vehicle_a, vehicle_b
-                )
-                high_confidence_crossing_impulse = (
-                    crossing_trajectories
-                    and target_impulse
-                    and spatial.contact
-                    and spatial.overlap_area
-                    >= self._area_threshold(
-                        self.mask_overlap_threshold, vehicle_a, vehicle_b
-                    )
-                    and closing_speed >= closing_speed_threshold
-                )
-                weak_contact_without_current_evidence = (
-                    spatial.contact
-                    and spatial.overlap_area == 0
-                    and not dynamic_evidence
-                    and closing_speed < closing_speed_threshold
-                )
-                confirmation_frames = self._window(
-                    self.collision_confirmation_frames
-                )
-                emitted = False
-                if (
-                    has_recent_contact
-                    and (
-                        fresh_contact
-                        or late_stationary_impact
-                        or bridged_dual_stop
-                        or bridged_strong_impact
-                    )
-                    and has_recent_dynamic
-                    and had_motion
-                    and reaction_is_valid
-                    and crossing_evidence_is_valid
-                    and not weak_contact_without_current_evidence
-                    and (
-                        has_recent_approach
-                        or late_stationary_impact
-                        or high_confidence_crossing_impulse
-                        or bridged_dual_stop
-                        or bridged_strong_impact
-                        or (strong_overlap and pair_state.saw_hard_deceleration)
-                    )
-                ):
-                    pair_state.status = "contact_candidate"
-                    pair_state.saw_occlusion_bridge |= (
-                        bridged_dual_stop or bridged_strong_impact
-                    )
-                    pair_state.candidate_frames += (
-                        confirmation_frames
-                        if (
-                            high_confidence_crossing_impulse
-                            or bridged_dual_stop
-                            or bridged_strong_impact
-                        )
-                        else 1
-                    )
-                elif not has_recent_contact:
-                    pair_state.reset_candidate(keep_temporal=True)
-                else:
-                    pair_state.candidate_frames = 0
-
-                if pair_state.candidate_frames >= confirmation_frames:
-                    ordered_a, ordered_b = self._ordered_states(vehicle_a, vehicle_b)
-                    collisions.append(
-                        self._build_event(
-                            pair, pair_state, ordered_a, ordered_b, frame_index
-                        )
-                    )
-                    emitted = True
-                    pair_state.status = "cooldown"
-                    pair_state.cooldown_until = frame_index + self._window(
-                        self.collision_cooldown_frames
-                    )
-                    pair_state.candidate_frames = 0
+                    pair_state.separation_frames += 1
+                if self._preexisting_contact_is_released(pair_state):
+                    pair_state.preexisting_contact = False
+                    pair_state.separation_frames = 0
+                    pair_state.preexisting_frames = 0
+                    pair_state.reset_candidate()
 
                 self._record_diagnostic(
                     frame_index=frame_index,
@@ -670,10 +526,267 @@ class CollisionDetector:
                     trajectory_deflection=trajectory_deflection,
                     crossing_trajectories=crossing_trajectories,
                     target_impulse=target_impulse,
-                    bridged_dual_stop=bridged_dual_stop,
-                    bridged_strong_impact=bridged_strong_impact,
-                    emitted=emitted,
+                    bridged_dual_stop=False,
+                    bridged_strong_impact=False,
+                    impulse_approach=False,
+                    delta_v_a=delta_v_a,
+                    delta_v_b=delta_v_b,
+                    delta_v_impact=delta_v_impact,
+                    emitted=False,
                 )
+                continue
+
+            if spatial.contact:
+                if pair_state.first_contact_frame is None:
+                    pair_state.first_contact_frame = frame_index
+                pair_state.last_contact_frame = frame_index
+                pair_state.max_overlap_area = max(
+                    pair_state.max_overlap_area, spatial.overlap_area
+                )
+                pair_state.max_overlap_ratio = max(
+                    pair_state.max_overlap_ratio, spatial.overlap_ratio
+                )
+                pair_state.min_distance_px = min(
+                    pair_state.min_distance_px, spatial.distance_px
+                )
+
+            closing_speed_threshold = self._pair_speed_threshold(
+                self.min_closing_speed_px, vehicle_a, vehicle_b
+            )
+            impulse_approach = False
+            if closing_speed >= closing_speed_threshold:
+                pair_state.approach_frames += 1
+                pair_state.max_closing_speed_px = max(
+                    pair_state.max_closing_speed_px, closing_speed
+                )
+                impulse_approach = self._is_impulse_approach(
+                    pair_state, closing_speed, closing_speed_threshold
+                )
+                if (
+                    pair_state.approach_frames
+                    >= self._window(self.approach_confirmation_frames)
+                    or impulse_approach
+                ):
+                    pair_state.last_approach_frame = frame_index
+                    pair_state.sustained_approach = True
+                    pair_state.saw_impulse_approach |= impulse_approach
+                    if crossing_trajectories:
+                        pair_state.last_crossing_approach_frame = frame_index
+            else:
+                pair_state.approach_frames = 0
+
+            dynamic_evidence = (
+                moving_vehicle_reaction
+                if stationary_role is not None
+                else hard_deceleration
+                or stop_transition
+                or delta_v_impact
+                or (dual_stop and had_motion)
+                or target_impulse
+            )
+            if dynamic_evidence:
+                pair_state.last_dynamic_frame = frame_index
+                pair_state.saw_hard_deceleration |= hard_deceleration
+                pair_state.saw_delta_v_impact |= delta_v_impact
+                pair_state.saw_stop_transition |= stop_transition
+                pair_state.saw_dual_stop |= dual_stop
+                pair_state.saw_trajectory_deflection |= trajectory_deflection
+                pair_state.saw_target_impulse |= target_impulse
+
+            has_recent_contact = self._is_recent(
+                pair_state.last_contact_frame, frame_index
+            )
+            has_recent_dynamic = self._is_recent(
+                pair_state.last_dynamic_frame, frame_index
+            )
+            has_recent_approach = self._is_approach_recent(
+                pair_state.last_approach_frame, frame_index
+            )
+            strong_overlap = pair_state.max_overlap_ratio >= max(
+                0.05, self.mask_overlap_ratio_threshold * 2.0
+            )
+            bridge_frames = self._window(self.crossing_dual_stop_bridge_frames)
+            min_gap_frames = self._window(self.crossing_dual_stop_min_gap_frames)
+            recent_observation_gap = (
+                pair_state.last_observation_gap_frame is not None
+                and 0
+                <= frame_index - pair_state.last_observation_gap_frame
+                <= bridge_frames
+                and pair_state.observation_gap_frames >= min_gap_frames
+            )
+            contact_age = self._contact_age(pair_state, frame_index)
+            max_contact_age = self._window(
+                self.max_contact_candidate_age_frames
+            )
+            fresh_contact = (
+                max_contact_age == 0 or contact_age <= max_contact_age
+            )
+            confirmed_moving_reaction = (
+                pair_state.reaction_frames
+                >= self._window(self.impact_reaction_confirmation_frames)
+            )
+            late_stationary_impact = (
+                stationary_role is not None
+                and pair_state.sustained_approach
+                and confirmed_moving_reaction
+                and trajectory_deflection
+            )
+            reaction_is_valid = (
+                stationary_role is None or confirmed_moving_reaction
+            )
+            crossing_disruption = (
+                target_impulse
+                or deflection_a
+                or deflection_b
+                # Un bersaglio colpito di lato viene deviato bruscamente ma
+                # spesso non soddisfa `trajectory_deflection`, che pretende
+                # velocita e spostamento di base sufficienti: il delta-V e
+                # la stessa perturbazione locale misurata senza quelle
+                # precondizioni.
+                or (
+                    self.delta_v_crossing_disruption_enabled
+                    and pair in delta_v_winners
+                    and self._pair_delta_v_is_significant(
+                        pair_state, vehicle_a, vehicle_b
+                    )
+                )
+            )
+            recent_crossing_approach = self._is_crossing_approach_recent(
+                pair_state.last_crossing_approach_frame, frame_index
+            )
+            crossing_context = (
+                crossing_trajectories or recent_crossing_approach
+            )
+            bridged_dual_stop = (
+                spatial.contact
+                and spatial.overlap_area > 0
+                and dual_stop
+                and had_motion
+                and recent_crossing_approach
+                and pair_state.last_crossing_approach_frame is not None
+                and pair_state.last_observation_gap_frame is not None
+                and pair_state.last_observation_gap_frame
+                > pair_state.last_crossing_approach_frame
+                and pair_state.observation_gap_frames >= min_gap_frames
+                and 0
+                <= frame_index - pair_state.last_observation_gap_frame
+                <= bridge_frames
+            )
+            bridged_strong_impact = (
+                spatial.contact
+                and spatial.overlap_area > 0
+                and strong_overlap
+                and had_motion
+                and pair_state.sustained_approach
+                and recent_observation_gap
+                and (
+                    pair_state.saw_hard_deceleration
+                    or crossing_disruption
+                )
+            )
+            crossing_evidence_is_valid = (
+                not crossing_context
+                or crossing_disruption
+                or bridged_dual_stop
+                or bridged_strong_impact
+            )
+            high_confidence_crossing_impulse = (
+                crossing_trajectories
+                and target_impulse
+                and spatial.contact
+                and spatial.overlap_area
+                >= self._area_threshold(
+                    self.mask_overlap_threshold, vehicle_a, vehicle_b
+                )
+                and closing_speed >= closing_speed_threshold
+            )
+            weak_contact_without_current_evidence = (
+                spatial.contact
+                and spatial.overlap_area == 0
+                and not dynamic_evidence
+                and closing_speed < closing_speed_threshold
+            )
+            confirmation_frames = self._window(
+                self.collision_confirmation_frames
+            )
+            emitted = False
+            if (
+                has_recent_contact
+                and (
+                    fresh_contact
+                    or late_stationary_impact
+                    or bridged_dual_stop
+                    or bridged_strong_impact
+                )
+                and has_recent_dynamic
+                and had_motion
+                and reaction_is_valid
+                and crossing_evidence_is_valid
+                and not weak_contact_without_current_evidence
+                and (
+                    has_recent_approach
+                    or late_stationary_impact
+                    or high_confidence_crossing_impulse
+                    or bridged_dual_stop
+                    or bridged_strong_impact
+                    or (strong_overlap and pair_state.saw_hard_deceleration)
+                )
+            ):
+                pair_state.status = "contact_candidate"
+                pair_state.saw_occlusion_bridge |= (
+                    bridged_dual_stop or bridged_strong_impact
+                )
+                pair_state.candidate_frames += (
+                    confirmation_frames
+                    if (
+                        high_confidence_crossing_impulse
+                        or bridged_dual_stop
+                        or bridged_strong_impact
+                    )
+                    else 1
+                )
+            elif not has_recent_contact:
+                pair_state.reset_candidate(keep_temporal=True)
+            else:
+                pair_state.candidate_frames = 0
+
+            if pair_state.candidate_frames >= confirmation_frames:
+                ordered_a, ordered_b = self._ordered_states(vehicle_a, vehicle_b)
+                collisions.append(
+                    self._build_event(
+                        pair, pair_state, ordered_a, ordered_b, frame_index
+                    )
+                )
+                emitted = True
+                pair_state.status = "cooldown"
+                pair_state.cooldown_until = frame_index + self._window(
+                    self.collision_cooldown_frames
+                )
+                pair_state.candidate_frames = 0
+
+            self._record_diagnostic(
+                frame_index=frame_index,
+                pair=pair,
+                pair_state=pair_state,
+                spatial=spatial,
+                closing_speed=closing_speed,
+                hard_deceleration=hard_deceleration,
+                dual_stop=dual_stop,
+                stop_transition=stop_transition,
+                had_motion=had_motion,
+                stationary_target=stationary_role is not None,
+                moving_vehicle_reaction=moving_vehicle_reaction,
+                trajectory_deflection=trajectory_deflection,
+                crossing_trajectories=crossing_trajectories,
+                target_impulse=target_impulse,
+                bridged_dual_stop=bridged_dual_stop,
+                bridged_strong_impact=bridged_strong_impact,
+                impulse_approach=impulse_approach,
+                delta_v_a=delta_v_a,
+                delta_v_b=delta_v_b,
+                delta_v_impact=delta_v_impact,
+                emitted=emitted,
+            )
 
         return collisions
 
@@ -787,6 +900,113 @@ class CollisionDetector:
         if self._time_factor == 1.0:
             return int(frames)
         return max(1, int(round(frames / self._time_factor)))
+
+    def _track_contact_episode_delta_v(
+        self,
+        pair_state: _PairState,
+        spatial: _SpatialEvidence,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+        frame_index: int,
+    ) -> None:
+        """Accumula il delta-V finche la coppia e nel proprio episodio di contatto.
+
+        Misurare il picco sull'intera vita del track non serve all'attribuzione:
+        un veicolo perturbato una volta resterebbe "colpevole" per ogni contatto
+        successivo. Verificato sui log: restringendo la misura all'episodio, la
+        coppia corretta passa da indistinguibile a nettamente prima fra quelle
+        che condividono un track.
+        """
+        if not spatial.contact and not self._is_recent(
+            pair_state.last_contact_frame, frame_index
+        ):
+            return
+        pair_state.contact_delta_v_px = max(
+            pair_state.contact_delta_v_px,
+            vehicle_a.delta_v_px if vehicle_a.kinematics_valid else 0.0,
+            vehicle_b.delta_v_px if vehicle_b.kinematics_valid else 0.0,
+        )
+
+    def _delta_v_crossing_winners(
+        self,
+        pending: list[
+            tuple[tuple[int, int], VehicleState, VehicleState, bool, _SpatialEvidence]
+        ],
+    ) -> set[tuple[int, int]]:
+        """Fra le coppie che condividono un track, quella piu perturbata.
+
+        Il delta-V appartiene a un track, non a una coppia: un veicolo che
+        attraversa piu flussi lo presenta identico su ogni coppia prospettica
+        che incontra, ed e per questo che usarlo come prova di attribuzione con
+        una soglia assoluta riporta il difetto che il gate delle traiettorie
+        incrociate esisteva per correggere. Renderlo competitivo lo trasforma da
+        "questo veicolo e stato perturbato" in "e questa la coppia in cui e
+        stato perturbato di piu", che e un'affermazione sulla coppia.
+
+        Una coppia senza concorrenti vince per definizione: li non c'e nessuna
+        ambiguita di attribuzione da risolvere.
+        """
+        if not self.delta_v_crossing_disruption_enabled:
+            return set()
+        contacting = [
+            (pair, self._pair_states[pair].contact_delta_v_px)
+            for pair, _, _, _, spatial in pending
+            if spatial.contact
+        ]
+        winners: set[tuple[int, int]] = set()
+        for pair, value in contacting:
+            rivals = [
+                other_value
+                for other_pair, other_value in contacting
+                if other_pair != pair
+                and (other_pair[0] in pair or other_pair[1] in pair)
+            ]
+            if all(value >= other for other in rivals):
+                winners.add(pair)
+        return winners
+
+    def _pair_delta_v_is_significant(
+        self,
+        pair_state: _PairState,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> bool:
+        """Il picco dell'episodio di contatto supera la soglia d'impatto."""
+        factor = self._pair_scale_factor(vehicle_a, vehicle_b)
+        threshold = (
+            self.delta_v_impact_threshold_px
+            * factor
+            * self._time_factor
+            * self._time_factor
+        )
+        return pair_state.contact_delta_v_px >= threshold
+
+    def _is_impulse_approach(
+        self,
+        pair_state: _PairState,
+        closing_speed: float,
+        closing_speed_threshold: float,
+    ) -> bool:
+        """Su una coppia appena nata l'intensita sostituisce la persistenza.
+
+        `approach_confirmation_frames` chiede che l'avvicinamento si ripeta per
+        piu frame consecutivi: e la difesa giusta contro il traffico affiancato,
+        ma non e soddisfacibile da una coppia che esiste da meno frame di quanti
+        ne servono, e questo e esattamente il caso di un ID riassegnato durante
+        l'occlusione dell'urto. Un closing speed di un ordine di grandezza sopra
+        la soglia non e rumore prospettico: e un avvicinamento che non si ripete
+        perche i due veicoli si sono gia toccati.
+        """
+        if not self.impulse_approach_enabled:
+            return False
+        if closing_speed_threshold <= 0.0:
+            return False
+        if pair_state.observed_frames > self._window(self.young_pair_max_frames):
+            return False
+        return (
+            closing_speed
+            >= closing_speed_threshold * self.impulse_approach_speed_multiplier
+        )
 
     def _both_tracks_are_new(
         self,
@@ -915,6 +1135,31 @@ class CollisionDetector:
                 self.strong_deceleration_threshold, vehicle
             )
         )
+
+    def _vehicle_delta_v_impact(self, vehicle: VehicleState) -> bool:
+        """Variazione vettoriale di velocita compatibile con un urto.
+
+        Copre il caso cieco della decelerazione scalare: un veicolo deviato
+        senza essere rallentato. La soglia scala come un'accelerazione perche
+        il delta-V ha le stesse unita, px/frame^2.
+        """
+        if not self.delta_v_evidence_enabled:
+            return False
+        return vehicle.kinematics_valid and (
+            vehicle.delta_v_px
+            >= self._acceleration_threshold(
+                self.delta_v_impact_threshold_px, vehicle
+            )
+        )
+
+    def _delta_v_impact(
+        self,
+        vehicle_a: VehicleState,
+        vehicle_b: VehicleState,
+    ) -> bool:
+        return self._vehicle_delta_v_impact(
+            vehicle_a
+        ) or self._vehicle_delta_v_impact(vehicle_b)
 
     def _stationary_target_and_mover(
         self,
@@ -1128,6 +1373,10 @@ class CollisionDetector:
         target_impulse: bool,
         bridged_dual_stop: bool,
         bridged_strong_impact: bool,
+        impulse_approach: bool,
+        delta_v_a: float,
+        delta_v_b: float,
+        delta_v_impact: bool,
         emitted: bool,
     ) -> None:
         self.last_diagnostics.append(
@@ -1161,6 +1410,11 @@ class CollisionDetector:
                 candidate_frames=pair_state.candidate_frames,
                 pair_status=pair_state.status,
                 emitted=emitted,
+                pair_observed_frames=pair_state.observed_frames,
+                impulse_approach=impulse_approach,
+                delta_v_a_px=delta_v_a,
+                delta_v_b_px=delta_v_b,
+                delta_v_impact=delta_v_impact,
             )
         )
 
@@ -1212,10 +1466,13 @@ class CollisionDetector:
             and not contact_is_recent
         ):
             pair_state.sustained_approach = False
+            pair_state.saw_impulse_approach = False
             pair_state.reaction_frames = 0
         if not self._is_recent(pair_state.last_dynamic_frame, frame_index):
             pair_state.last_dynamic_frame = None
             pair_state.saw_hard_deceleration = False
+            pair_state.saw_delta_v_impact = False
+            pair_state.max_delta_v_px = 0.0
             pair_state.saw_dual_stop = False
             pair_state.saw_stop_transition = False
             pair_state.saw_trajectory_deflection = False
@@ -1227,6 +1484,7 @@ class CollisionDetector:
             pair_state.max_closing_speed_px = 0.0
             if not contact_is_recent:
                 pair_state.sustained_approach = False
+                pair_state.saw_impulse_approach = False
         if not self._is_crossing_approach_recent(
             pair_state.last_crossing_approach_frame, frame_index
         ):
@@ -1250,6 +1508,8 @@ class CollisionDetector:
         reasons: list[str] = ["temporal_contact"]
         if pair_state.saw_hard_deceleration:
             reasons.append("hard_deceleration")
+        if pair_state.saw_delta_v_impact:
+            reasons.append("delta_v_impact")
         if pair_state.saw_stop_transition:
             reasons.append("stop_transition")
         if pair_state.saw_dual_stop:
@@ -1260,9 +1520,12 @@ class CollisionDetector:
             reasons.append("target_impulse")
         if pair_state.saw_occlusion_bridge:
             reasons.append("occlusion_bridge")
+        if pair_state.saw_impulse_approach:
+            reasons.append("impulse_approach")
 
         confidence = 0.35 + min(0.2, pair_state.max_overlap_ratio)
         confidence += 0.2 if pair_state.saw_hard_deceleration else 0.0
+        confidence += 0.15 if pair_state.saw_delta_v_impact else 0.0
         confidence += 0.15 if pair_state.saw_stop_transition else 0.0
         confidence += 0.1 if pair_state.max_closing_speed_px > 0.0 else 0.0
         confidence += 0.1 if pair_state.saw_trajectory_deflection else 0.0
@@ -1284,6 +1547,7 @@ class CollisionDetector:
                 0.0 if math.isinf(pair_state.min_distance_px) else pair_state.min_distance_px
             ),
             closing_speed_px=pair_state.max_closing_speed_px,
+            delta_v_px=pair_state.max_delta_v_px,
             confidence=min(1.0, confidence),
             first_contact_frame=pair_state.first_contact_frame,
             confirmation_frame=frame_index,

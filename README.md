@@ -86,8 +86,16 @@ jitter del tracker.
 ```python
 vx, vy = compute_velocity_px(previous_anchor, motion_anchor, frame_delta)
 speed_px = math.hypot(vx, vy)
+delta_v_px = compute_delta_v_px(previous_raw_velocity, (vx, vy), frame_delta)
 ```
-Espone inoltre accelerazione e contatore di stop consecutivo.
+Espone inoltre accelerazione, contatore di stop consecutivo e delta-V.
+
+`compute_acceleration` e `compute_delta_v_px` non sono varianti dello stesso
+calcolo. La prima deriva la **magnitudine** della velocità, quindi non vede un
+cambio di direzione a modulo costante: un urto laterale che devia un veicolo di
+90° senza rallentarlo produce accelerazione zero. Il delta-V misura invece la
+variazione del **vettore**, cioè la grandezza che compare nella conservazione
+della quantità di moto, e in quel caso vale `v·√2`.
 
 ---
 
@@ -95,6 +103,17 @@ Espone inoltre accelerazione e contatore di stop consecutivo.
 Implementa lo store `VehicleStateStore` che mantiene lo storico frame-to-frame di ogni traccia assegnata da ByteTrack.
 Usa il punto inferiore centrale della bbox come ancora di moto, conserva una
 storia limitata e invalida la cinematica dopo gap troppo lunghi.
+
+Contiene anche una re-identificazione opzionale (`track_reid_enabled`,
+**disattivata**): quando un ID nuovo compare dove un altro è appena sparito, il
+nuovo track prende il posto del vecchio invece di nascere da zero, così la
+storia cinematica sopravvive a un cambio di ID durante l'occlusione di un urto.
+È stata misurata inefficace su questo dataset — vedi `CRASH_DETECTION_PLAN.md`,
+punto 2b — perché l'associazione basata su posizione e scala non è separabile:
+il donatore migliore dista in mediana due lunghezze di veicolo. Il codice resta
+perché la parte riutilizzabile è l'impalcatura (ricerca del donatore assente,
+spostamento dello stato); a dover cambiare è la funzione di somiglianza, che
+richiede un descrittore d'aspetto.
 **Pezzi di codice chiave:**
 ```python
 kinematics_valid = 0 < frame_delta <= max_kinematic_gap_frames
@@ -110,8 +129,8 @@ combina due famiglie di evidenze:
 
 - contatto spaziale: overlap assoluto o normalizzato, oppure contatto tra
   maschere dilatate per riconoscere sagome adiacenti senza pixel condivisi;
-- dinamica: decelerazione brusca, transizione movimento-arresto e dual stop
-  solo quando esiste movimento precedente.
+- dinamica: decelerazione brusca, delta-V oltre soglia, transizione
+  movimento-arresto e dual stop solo quando esiste movimento precedente.
 
 Le evidenze possono cadere in frame vicini grazie a una finestra temporale.
 Un candidato deve essere confermato più volte e, dopo l'emissione, la coppia
@@ -130,6 +149,15 @@ una riassegnazione del tracker durante l'occlusione dell'urto, non da due
 veicoli già accostati. Il disarmo scade inoltre dopo un numero massimo di
 frame, così due veicoli che restano a contatto dopo un impatto non restano
 esclusi per il resto del video.
+
+La conferma dell'avvicinamento su più frame ha però un limite strutturale: non è
+soddisfacibile da una coppia che esiste da meno frame di quanti ne richiede, ed
+è proprio il caso di un ID riassegnato dal tracker durante l'occlusione
+dell'impatto. Per le sole coppie osservate da pochi frame è quindi ammesso un
+percorso alternativo in cui l'intensità sostituisce la persistenza: un singolo
+frame con closing speed molto superiore alla soglia vale come avvicinamento
+sostenuto. Sostituisce quel gate soltanto — contatto, movimento precedente ed
+evidenza dinamica restano tutti richiesti.
 
 Nel traffico parallelo lento, anche l'avvicinamento relativo deve essere
 confermato per più frame ed essere temporalmente vicino all'inizio del contatto.
@@ -152,6 +180,19 @@ bersaglio deve mostrare una perturbazione locale, come una deviazione oppure
 un'accelerazione positiva improvvisa coerente con un trasferimento di moto.
 Per i contatti dovuti alla sola dilatazione delle maschere, ogni frame di
 conferma richiede inoltre evidenza dinamica o avvicinamento corrente.
+
+Il delta-V copre il punto cieco della decelerazione scalare, che è la derivata
+del solo modulo della velocità e vale zero quando un urto devia un veicolo
+senza rallentarlo — il caso tipico di un `t-bone`, 657 video su 2.027. Viene
+usato accanto alla decelerazione e mai al suo posto, ed è misurato sulla
+velocità grezza perché il filtro EMA smorzerebbe proprio il picco da rilevare.
+
+Lo stesso delta-V **non** viene invece usato come prova di attribuzione fra
+traiettorie incrociate, benché sia l'uso che sembrava più promettente: un
+veicolo che attraversa più flussi ha delta-V elevato su ogni coppia con cui si
+sovrappone, quindi la perturbazione smette di essere locale e riemerge il
+difetto che il paragrafo precedente descrive. Il flag esiste
+(`delta_v_crossing_disruption_enabled`) ed è disattivato.
 
 Un impatto fronto-laterale può però arrestare entrambi i veicoli senza
 deviazioni visibili e nascondere temporaneamente uno dei track proprio durante
@@ -255,6 +296,22 @@ oraria e qualità. La tolleranza predefinita è di 1 secondo; può essere cambia
 
 Un singolo caso di regressione può essere selezionato con, ad esempio,
 `--video 8G56ILxFFNM_00.mp4`.
+
+Qualsiasi campo di `AppConfig` può essere sovrascritto per la singola
+esecuzione con `--set nome=valore`, opzione ripetibile:
+
+```powershell
+python -m src.benchmark `
+  --metadata dataset/metadata-real.csv --dataset-root dataset `
+  --output-dir calibration/variante --resume --diagnostics `
+  --set track_reid_enabled=true --set impulse_approach_enabled=true
+```
+
+Serve a confrontare due configurazioni sullo stesso campione senza modificare
+`src/config.py` fra un run e l'altro: la modifica al sorgente non lascia traccia
+nei log, mentre gli override finiscono sia nel record `metadata` di ogni JSONL
+sia nella sezione `selection` di `report.json`. Usare una `--output-dir` diversa
+per variante, altrimenti `--resume` considera già completati i log dell'altra.
 
 Per calibrare le soglie su un sottoinsieme ristretto si può aggiungere
 `--diagnostics`: vengono registrate anche le evidenze di ogni coppia per ogni
