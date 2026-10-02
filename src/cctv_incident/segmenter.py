@@ -5,7 +5,29 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .features import bbox_iou
 from .types import Instance
+
+
+def suppress_duplicate_instances(instances, min_box_iou=0.6, min_mask_iou=0.7):
+    """Keep one detection per silhouette, including duplicate vehicle classes."""
+    kept = []
+    areas = {}
+    for instance in sorted(instances, key=lambda item: item.confidence, reverse=True):
+        area = np.count_nonzero(instance.mask)
+        duplicate = False
+        for previous in kept:
+            if bbox_iou(instance.bbox, previous.bbox) < min_box_iou:
+                continue
+            intersection = np.count_nonzero(instance.mask & previous.mask)
+            union = area + areas[id(previous)] - intersection
+            if union > 0 and intersection / union >= min_mask_iou:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(instance)
+            areas[id(instance)] = area
+    return kept
 
 
 def configure_offline_runtime():
@@ -31,7 +53,8 @@ class Segmenter:
 
         if not config.model.exists():
             raise FileNotFoundError(
-                f"Local model missing: {config.model}. Run scripts/download_model.py first."
+                f"Local model missing: {config.model}. "
+                f"Run scripts/download_model.py --output {config.model} first."
             )
         expected = {"pytorch": ".pt", "onnx": ".onnx", "tensorrt": ".engine"}
         if config.backend in expected and config.model.suffix != expected[config.backend]:
@@ -66,10 +89,12 @@ class Segmenter:
         masks = result.masks.data
         if masks.shape[1:] != frame.shape[:2]:
             raise ValueError("Expected retina masks in original frame coordinates")
-        return [
-            Instance(box[:4].copy(), mask > 0.5, int(box[5]), float(box[4]))
-            for box, mask in zip(result.boxes.data, masks, strict=True)
-        ]
+        return suppress_duplicate_instances(
+            [
+                Instance(box[:4].copy(), mask > 0.5, int(box[5]), float(box[4]))
+                for box, mask in zip(result.boxes.data, masks, strict=True)
+            ]
+        )
 
 
 class SyntheticSegmenter:

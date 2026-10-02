@@ -103,3 +103,32 @@ def test_impact_without_confirmation_still_expires(config):
         evidence = {key: (0.8, timestamp < 0.4, timestamp == 0.2, False, {"approach"})}
         assert not detector._advance(evidence, timestamp, 1).events
     assert not detector.candidates
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.5])
+def test_ground_point_jump_inside_stationary_boxes_cannot_create_collision(config, scale):
+    detector = ImageEventDetector(config.events, config.features, "camera")
+    reference = image_reference("camera", (640, 360))
+    store = TrajectoryStore(config.tracking, config.features, "image")
+    events = []
+    peak_speed = peak_deceleration = 0
+    for timestamp in np.arange(0, 4, 0.1):
+        observations = []
+        for key, x in [(1, 200), (2, 220)]:
+            # A mask edge moves by 30 px, but both vehicle boxes remain stationary.
+            point_x = x + (-15 if timestamp < 1 else 15) if key == 1 else x
+            point = np.array([point_x, 120.0]) * scale
+            box = np.array([x - 20, 100, x + 20, 140]) * scale
+            observations.append(Observation(key, timestamp, point, tuple(point), box))
+        motions = store.update(observations, timestamp)
+        peak_speed = max(peak_speed, motions[1].speed / scale)
+        peak_deceleration = max(peak_deceleration, motions[1].deceleration / scale)
+        events.extend(
+            detector.update(
+                motions, compute_pairs(motions, config.features, "image"), timestamp, reference
+            ).events
+        )
+    # Exercise a large false approach and braking impulse, not just subpixel jitter.
+    assert peak_speed > 50
+    assert peak_deceleration > 50
+    assert events == []

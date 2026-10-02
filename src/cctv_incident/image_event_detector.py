@@ -1,5 +1,6 @@
 """Uncalibrated baseline using pixel motion relative to apparent vehicle size."""
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,13 +22,45 @@ class ImageEventDetector(EventDetector):
     def __init__(self, config, features, camera_id):
         super().__init__(config, features, camera_id)
         self.coordinate_mode = "image"
+        self.box_histories: dict[int, deque] = {}
         self.contacts: dict[tuple[int, ...], ContactMemory] = {}
         self.sideswipes = SideswipeDetector(config, features, camera_id)
 
     def reset(self):
         super().reset()
         self.contacts.clear()
+        self.box_histories.clear()
         self.sideswipes.reset()
+
+    def _update_box_history(self, motions, timestamp):
+        # Ground points can jump within a stationary mask; retain observed box motion.
+        window = max(self.features.max_gap_s, self.config.confirm_duration_s)
+        for key in list(self.box_histories):
+            rows = self.box_histories[key]
+            while rows and timestamp - rows[0][0] > window:
+                rows.popleft()
+            if not rows:
+                del self.box_histories[key]
+        for key, motion in motions.items():
+            observation = motion.observation
+            if observation.predicted or observation.timestamp_s != timestamp:
+                continue
+            if observation.quality < self.config.image.min_quality:
+                continue
+            rows = self.box_histories.setdefault(key, deque(maxlen=256))
+            rows.append((timestamp, (observation.bbox[:2] + observation.bbox[2:]) / 2))
+
+    def _box_is_stationary(self, motion):
+        rows = self.box_histories.get(motion.observation.track_id, ())
+        if not rows or rows[-1][0] - rows[0][0] + 1e-6 < self.config.confirm_duration_s:
+            return False
+        displacement = np.linalg.norm(np.ptp(np.array([point for _, point in rows]), axis=0))
+        tolerance = (
+            bbox_diagonal(motion.observation.bbox)
+            * self.features.image.stop_speed_diagonals_s
+            * self.config.confirm_duration_s
+        )
+        return displacement <= tolerance
 
     def update(self, motions, pairs, timestamp, calibration):
         if timestamp <= self.last_timestamp:
@@ -40,6 +73,7 @@ class ImageEventDetector(EventDetector):
             self.reset()
             return Decision("PAUSED", reasons=["image_reference_invalid"])
         cfg = self.config.image
+        self._update_box_history(motions, timestamp)
         evidence = {}
         for pair in pairs:
             members = [motions[track_id] for track_id in pair.track_ids]
@@ -101,8 +135,9 @@ class ImageEventDetector(EventDetector):
                 + 0.15 * overlap
                 + 0.2 * stopped,
             )
-            trigger = low_ttc or (close and overlap and braking)
-            impact = close and overlap and (braking or stopped)
+            motion_supported = any(not self._box_is_stationary(m) for m in members)
+            trigger = motion_supported and (low_ttc or (close and overlap and braking))
+            impact = motion_supported and close and overlap and (braking or stopped)
             post = close and overlap and stopped
             # Require independent reactions in two observed vehicles before bridging
             # an occlusion. One braking vehicle behind a passing car is insufficient.
@@ -148,6 +183,7 @@ class ImageEventDetector(EventDetector):
             moving_before = motion.prior_speed / scale >= cfg.min_prior_speed_diagonals_s
             abrupt = (
                 moving_before
+                and not self._box_is_stationary(motion)
                 and motion.deceleration / scale >= cfg.deceleration_diagonals_s2
                 and motion.heading_change >= cfg.heading_change_rad
             )

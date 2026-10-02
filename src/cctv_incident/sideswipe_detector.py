@@ -15,16 +15,20 @@ class SideContact:
     timestamp: float
     boxes: dict
     velocities: dict
+    prior_boxes: dict = field(default_factory=dict)
+    rotated: set = field(default_factory=set)
+    crossing: bool = False
     hits: int = 1
     responders: set = field(default_factory=set)
     post_since: dict = field(default_factory=dict)
 
 
 class SideswipeDetector:
-    """Stage weak side contact, then require sustained independent aftermath.
+    """Confirm lateral and crossing contacts from observed aftermath.
 
-    A young track may establish contact; confirmation waits for track maturity,
-    repeated overlap, rotation and slowdown, plus a reaction in the other vehicle.
+    Side contacts need repeated overlap and independent vehicle reactions.
+    Crossing contacts need mature tracks with a previously observed separation,
+    followed by strong overlap, rotation and sustained slowdown near the contact.
     """
 
     def __init__(self, config, features, camera_id):
@@ -89,14 +93,41 @@ class SideswipeDetector:
             closing = -float(p @ (vb - va)) / max(1, np.linalg.norm(p)) / scale
             speeds = [np.linalg.norm(v) for v in [va, vb]]
             alignment = float(va @ vb) / max(1, speeds[0] * speeds[1])
+            crossing = abs(alignment) < side.min_direction_cosine
+            prior_boxes = {}
+            if crossing:
+                other_samples = dict(self.histories[key[1]])
+                separate_samples = [
+                    (sample_time, box, other_samples[sample_time])
+                    for sample_time, box in self.histories[key[0]]
+                    if sample_time in other_samples
+                    and 0 < t - sample_time <= cfg.occlusion_confirmation_s
+                    and bbox_contact_coverage(box, other_samples[sample_time])
+                    < side.min_contact_coverage
+                ]
+                if separate_samples:
+                    prior_boxes = dict(zip(key, separate_samples[-1][1:], strict=True))
+                if (
+                    not separate_samples
+                    or coverage < cfg.min_contact_coverage
+                    or min(a.age_s, b.age_s) < self.config.min_track_age_s
+                ):
+                    continue
             if (
                 closing < cfg.min_approach_speed_diagonals_s
-                or alignment < side.min_direction_cosine
-                or min(speeds) / scale < cfg.min_prior_speed_diagonals_s
+                or (not crossing and alignment < side.min_direction_cosine)
+                or any(
+                    speed / bbox_diagonal(box) < cfg.min_prior_speed_diagonals_s
+                    for speed, box in zip(speeds, boxes, strict=True)
+                )
             ):
                 continue
             self.contacts[key] = SideContact(
-                t, dict(zip(key, boxes, strict=True)), dict(zip(key, [va, vb], strict=True))
+                t,
+                dict(zip(key, boxes, strict=True)),
+                dict(zip(key, [va, vb], strict=True)),
+                crossing=crossing,
+                prior_boxes=prior_boxes,
             )
         events = []
         for key, c in list(self.contacts.items()):
@@ -114,7 +145,9 @@ class SideswipeDetector:
                 if m is None or m.age_s < self.config.min_track_age_s:
                     c.post_since.pop(k, None)
                     continue
-                old = c.boxes[k]
+                # A contact box can cover two occluded vehicles. Compare shape
+                # against the last observation in which they were still separate.
+                old = c.prior_boxes.get(k, c.boxes[k])
                 box = m.observation.bbox
                 old_aspect = (old[2] - old[0]) / max(1, old[3] - old[1])
                 aspect = (box[2] - box[0]) / max(1, box[3] - box[1])
@@ -132,12 +165,29 @@ class SideswipeDetector:
                 slow = (
                     np.linalg.norm(velocity) <= np.linalg.norm(prior) * cfg.post_impact_speed_ratio
                 )
-                good = (
-                    c.hits >= 2
+                contact_region = np.r_[
+                    np.minimum.reduce([b[:2] for b in c.boxes.values()]),
+                    np.maximum.reduce([b[2:] for b in c.boxes.values()]),
+                ]
+                near_contact = (
+                    bbox_contact_coverage(box, contact_region) >= cfg.min_contact_coverage
+                )
+                # Retain rotation only after sustained joint evidence; small box
+                # fluctuations must not erase an already observed reaction.
+                if (
+                    c.crossing
                     and shape >= side.min_shape_change
-                    and angle >= side.min_heading_change_rad
+                    and k in c.post_since
+                    and t - c.post_since[k] >= self.config.candidate_duration_s
+                ):
+                    c.rotated.add(k)
+                good = (
+                    (c.crossing or c.hits >= 2)
+                    and (shape >= side.min_shape_change or k in c.rotated)
+                    and (c.crossing or angle >= side.min_heading_change_rad)
+                    and (not c.crossing or near_contact)
                     and slow
-                    and any(i != k for i in c.responders)
+                    and (c.crossing or any(i != k for i in c.responders))
                 )
                 if not good:
                     c.post_since.pop(k, None)
@@ -156,10 +206,10 @@ class SideswipeDetector:
                             0,
                             [
                                 "image_coordinates",
-                                "side_contact",
+                                "crossing_contact" if c.crossing else "side_contact",
                                 "vehicle_rotation",
                                 "post_impact_slowdown",
-                                "two_vehicle_reaction",
+                                "crossing_approach" if c.crossing else "two_vehicle_reaction",
                             ],
                             coordinate_mode="image",
                         )

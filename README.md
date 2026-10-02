@@ -1,7 +1,7 @@
 # CCTV Incident Detection
 
 Sistema Python locale per individuare **possibili incidenti** da una telecamera fissa.
-Include YOLO26n-seg, ByteTrack, omografia manuale, proposta assistita dalle strisce,
+Include YOLO26-seg, ByteTrack, omografia manuale, proposta assistita dalle strisce,
 traiettorie metriche, detector temporale spiegabile, clip MP4, SQLite, UI Streamlit e
 strumenti per dataset, training, export e valutazione.
 
@@ -40,11 +40,13 @@ Interfaccia completa, dopo l'installazione:
 Su Linux/macOS usare gli eseguibili in `.venv/bin/`; il lockfile e la configurazione
 PyTorch CPU sono stati verificati su Windows. Nessun servizio cloud è necessario.
 
-Per i video reali, **Qualità analisi → Accurata** usa YOLO26m-seg a 15 FPS
-richiesti. È più lenta su CPU, ma può mantenere tracce che la modalità Rapida perde
-nelle scene difficili. Il modello si prepara esplicitamente con:
+Per i video reali, **Qualità analisi → Rapida** usa YOLO26s-seg a 8 FPS
+richiesti; **Accurata** usa YOLO26m-seg a 15 FPS. Il modello small conserva meglio
+i veicoli poco visibili rispetto al precedente nano, con un costo di calcolo
+maggiore. Accurata rimane più lenta su CPU. Preparare esplicitamente i modelli:
 
 ```powershell
+.venv\Scripts\python.exe scripts/download_model.py --output models/yolo26s-seg.pt
 .venv\Scripts\python.exe scripts/download_model.py --output models/yolo26m-seg.pt
 ```
 
@@ -54,8 +56,12 @@ veicoli. Una breve perdita di una traccia non cancella subito quel contesto.
 Per gli urti laterali vengono cercati anche cambiamenti persistenti di forma,
 direzione e velocità dopo contatti ripetuti. Il tracker usa il movimento per
 mantenere l'identità dei veicoli veloci quando le bbox si sovrappongono poco;
-le associazioni ambigue vengono escluse. I risultati verificati sui video
-segnalati sono in [docs/real-video-validation.md](docs/real-video-validation.md).
+le associazioni ambigue vengono escluse. Negli urti trasversali viene conservato
+il primo contatto tra due veicoli prima separati, confermandolo con rotazione e
+rallentamento persistenti nella zona dell'urto. Rilevazioni duplicate della stessa
+sagoma e salti del punto della maschera su bbox ferme vengono filtrati.
+I risultati verificati sui video segnalati sono in
+[docs/real-video-validation.md](docs/real-video-validation.md).
 
 ## Rivedere un'analisi
 

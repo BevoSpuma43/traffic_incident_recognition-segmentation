@@ -7,7 +7,7 @@ video:
   target_fps: 8
   max_width: 1280
 perception:
-  model: models/yolo26n-seg.pt
+  model: models/yolo26s-seg.pt
   backend: pytorch
   device: cpu
   image_size: 640

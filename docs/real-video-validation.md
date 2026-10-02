@@ -166,3 +166,74 @@ il nuovo detector. Questo controllo non rivaluta il nuovo tracker sui dieci
 video: sono state rieseguite integralmente le tre clip indicate nella tabella.
 La correzione e verificata su casi segnalati dall'utente, non su un nuovo test
 indipendente; non dimostra affidabilita generale.
+
+
+## Correzione del 24 settembre 2026: 50uYv-SxT-o_00
+
+L'impatto annotato e segnalato dall'utente avviene a **9,0 s**. La precedente
+Rapida (YOLO26n, 8 FPS) non conservava entrambi i veicoli prima del contatto e
+produceva zero eventi. Accurata (YOLO26m, 15 FPS) segnalava invece **14,375 s**:
+due rilevazioni con classi diverse descrivevano lo stesso veicolo ormai fermo,
+creando un falso contatto tra due tracce.
+
+La correzione introduce:
+
+- **Rapida con YOLO26s-seg**, ancora a 640 pixel e 8 FPS richiesti. I pesi
+  vengono preparati esplicitamente, senza download durante l'analisi.
+- Soppressione delle rilevazioni duplicate prima del tracking, solo quando
+  entrambe le bbox e le maschere hanno una forte sovrapposizione. Due veicoli
+  con maschere distinte restano separati anche se le bbox si intersecano.
+- Memoria del contatto tra veicoli che si avvicinano da direzioni trasversali:
+  servono tracce mature, separazione precedentemente osservata, contatto,
+  cambiamento persistente della forma e rallentamento nella regione dell'urto.
+  La forma viene confrontata con l'ultima bbox prima del contatto, che puo
+  essere seguita da una maschera comprendente entrambi i mezzi. La conferma
+  mantiene il timestamp del contatto, anche quando una traccia diventa occlusa.
+- Verifica del movimento osservato delle bbox prima di creare un nuovo
+  allarme: un salto del punto ricavato dalla maschera dentro un veicolo fermo
+  non basta a simulare avvicinamento e frenata.
+
+Nessun nome file, etichetta o timestamp del dataset viene usato nelle regole
+di inferenza. Risultati delle nuove analisi integrali:
+
+| Video | Profilo | Impatto rilevato | Conferma | Run |
+|---|---|---:|---:|---|
+| 50uYv-SxT-o_00 | Rapida, YOLO26s, 8 FPS | 9,000000 s | 10,416667 s | 6c1334aa289f4b86 |
+| 50uYv-SxT-o_00 | Accurata, YOLO26m, 15 FPS | 9,083333 s | 9,958333 s | 9f9ed2dbd5d348da |
+| JTIfOGQql0A_00 | Rapida, YOLO26s, 8 FPS | 8,266667 s | 10,266667 s | 8a72a2b40b3a4c28 |
+| n77TaXyADls_00 | Accurata, YOLO26m, 15 FPS | 4,604600 s | 5,271933 s | 637d24b9bf9142dc |
+| 7ORiNi_LtxY_00 | Accurata, YOLO26m, 15 FPS | 3,791667 s | 4,958333 s | 93a9680a0ac24687 |
+
+Ogni esecuzione produce **un solo evento**. Per 50uYv-SxT-o_00 l'errore rispetto
+all'annotazione e rispettivamente **0 s** e **+0,083333 s**. Tempi misurati su
+questa CPU: 48,97 s in Rapida e 221,80 s in Accurata, per un video di 30 s;
+sono misure locali, influenzate anche dal carico della macchina. Entrambi i
+replay contengono tutti i 434 frame decodificati, con PTS crescenti e segnale
+rosso sul contatto. I due replay sono stati controllati anche visivamente.
+
+Il controllo sui video precedenti ha individuato un ulteriore falso evento
+a 25,533 s in JTIfOGQql0A_00 con il modello small. Il controllo delle bbox ferme
+lo elimina: questo video e stato rieseguito integralmente con la correzione finale.
+Le altre quattro analisi integrali sono state riconfermate con il detector
+finale sulle rispettive traiettorie salvate, ottenendo gli stessi eventi,
+timestamp di impatto e conferma e ID.
+
+Suite completa: **101 test superati**, inclusi duplicati tra classi, maschere
+distinte, urto trasversale alle due risoluzioni, assenza di contatto/rotazione,
+perdita delle osservazioni, sole previsioni, scadenza e salti della maschera su
+bbox ferme. Ruff senza errori.
+
+- [Report delle cinque analisi](../outputs/impact-diagnosis/50uYv-SxT-o_00/correction.json)
+- [Controllo del detector finale](../outputs/impact-diagnosis/50uYv-SxT-o_00/final-detector-regression.json)
+- [Rapida: replay annotato](../outputs/real-videos/runs/6c1334aa289f4b86/annotated.mp4)
+- [Accurata: replay annotato](../outputs/real-videos/runs/9f9ed2dbd5d348da/annotated.mp4)
+
+Il detector finale sulle dieci traiettorie storiche nano mantiene TP=1, FP=1,
+FN=9; resta il falso evento di afVZZ3v87cc_00. Questo controllo non rivaluta
+segmentazione e tracking con i nuovi pesi sulle dieci clip. I video segnalati
+sono casi di regressione usati per la correzione, non una valutazione su dati
+indipendenti. Le vecchie analisi e il tentativo intermedio con il falso allarme
+sono conservati per confronto.
+
+Pesi YOLO26s-seg SHA256:
+`3da1d83e31caec96f9300eb4064f4f62882c133c7c264d63dfe61a7c197837a4`.
