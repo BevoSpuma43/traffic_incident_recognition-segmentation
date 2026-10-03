@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -14,12 +15,20 @@ from cctv_incident.config import load_config
 from cctv_incident.pipeline import Pipeline
 from cctv_incident.replay import export_replay, list_saved_runs
 from cctv_incident.storage import EventStorage
+from cctv_incident.video_inputs import VIDEO_EXTENSIONS, list_dataset_videos, save_uploaded_video
 
 st.set_page_config(page_title="CCTV Incident Detection", page_icon="🚦", layout="wide")
 st.title("CCTV · Incident Detection")
 st.caption(
     "Analisi locale di una telecamera · Traiettorie, geometria stradale e conferma temporale"
 )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def dataset_video_options(root):
+    return list_dataset_videos(root)
+
+
 preset = st.sidebar.selectbox(
     "Modalita",
     ["Demo sintetica", "Video reale senza calibrazione", "Video con calibrazione metrica"],
@@ -42,20 +51,6 @@ if cfg.events.coordinate_mode == "image":
         "Analisi in coordinate immagine: moto in px/s e soglie relative ai veicoli. "
         "La precisione del rilevamento deve essere verificata su dati reali."
     )
-    manifest = cfg.project.root_dir / "outputs/accident-sample/sample.json"
-    if manifest.is_file():
-        videos = json.loads(manifest.read_text(encoding="utf-8"))["videos"]
-        selected_clip = st.sidebar.selectbox(
-            "Video del campione ACCIDENT",
-            ["Percorso personalizzato"] + [r["clip_id"] for r in videos],
-        )
-        if selected_clip != "Percorso personalizzato":
-            selected_row = next(r for r in videos if r["clip_id"] == selected_clip)
-            cfg.video.source = str(
-                cfg.project.root_dir / "data/raw/ACCIDENT" / selected_row["path"]
-            )
-            cfg.video.clip_id = selected_clip
-            cfg.calibration.camera_id = selected_row["camera_id"]
 if cfg.events.coordinate_mode == "image" and cfg.perception.backend == "pytorch":
     analysis_quality = st.sidebar.selectbox(
         "Qualità analisi",
@@ -70,10 +65,95 @@ if cfg.events.coordinate_mode == "image" and cfg.perception.backend == "pytorch"
         cfg.perception.model = accurate_model
         cfg.perception.image_size = 640
         cfg.video.target_fps = 15
-source = st.sidebar.text_input(
-    "Percorso video o URL RTSP", cfg.video.source, key=f"source_{cfg.video.source}"
-)
+source_ready = True
+if preset == "Demo sintetica":
+    source = st.sidebar.text_input(
+        "Percorso video o URL RTSP", cfg.video.source, key=f"source_{cfg.video.source}"
+    )
+else:
+    dataset_root = cfg.project.root_dir / "data/raw/ACCIDENT"
+    source_options = ["Carica un video"]
+    if dataset_root.is_dir():
+        source_options.append("Video del dataset ACCIDENT")
+    source_options.append("Percorso o URL RTSP")
+    default_source = (
+        "Video del dataset ACCIDENT"
+        if cfg.events.coordinate_mode == "image" and dataset_root.is_dir()
+        else "Percorso o URL RTSP"
+    )
+    source_mode = st.sidebar.radio(
+        "Sorgente video", source_options, index=source_options.index(default_source)
+    )
+    source = ""
+    if source_mode == "Carica un video":
+        uploaded_video = st.sidebar.file_uploader(
+            "Scegli un video dal computer",
+            type=list(VIDEO_EXTENSIONS),
+            key="uploaded_video",
+            help=f"Fino a {st.get_option('server.maxUploadSize')} MB per file. "
+            "Il video viene conservato per poter rivedere le analisi.",
+        )
+        source_ready = uploaded_video is not None
+        if uploaded_video is not None:
+            upload_identity = (str(cfg.project.root_dir), uploaded_video.file_id)
+            saved_upload = st.session_state.get("saved_video_upload", {})
+            try:
+                if (
+                    saved_upload.get("identity") != upload_identity
+                    or not Path(saved_upload.get("path", "")).is_file()
+                ):
+                    with uploaded_video.getbuffer() as content:
+                        uploaded_path = save_uploaded_video(
+                            uploaded_video.name, content, cfg.project.root_dir / "data/uploads"
+                        )
+                    saved_upload = {"identity": upload_identity, "path": str(uploaded_path)}
+                    st.session_state["saved_video_upload"] = saved_upload
+                source = saved_upload["path"]
+                st.sidebar.success(f"Video pronto: {uploaded_video.name}")
+            except (OSError, ValueError) as exc:
+                source_ready = False
+                st.sidebar.error(f"Impossibile caricare il video: {exc}")
+    elif source_mode == "Video del dataset ACCIDENT":
+        video_options = dataset_video_options(str(dataset_root))
+        st.sidebar.caption(f"{len(video_options)} video disponibili. Cerca il nome nel menu.")
+        if video_options:
+            current_video = Path(cfg.video.source)
+            current_option = (
+                current_video.relative_to(dataset_root).as_posix()
+                if current_video.is_relative_to(dataset_root)
+                else None
+            )
+            selected_video = st.sidebar.selectbox(
+                "Video del dataset",
+                video_options,
+                index=video_options.index(current_option) if current_option in video_options else 0,
+                key="dataset_video",
+            )
+            source = str(dataset_root / selected_video)
+        else:
+            source_ready = False
+            st.sidebar.info("Nessun video trovato nel dataset.")
+    else:
+        source = st.sidebar.text_input(
+            "Percorso video o URL RTSP", cfg.video.source, key=f"source_{cfg.video.source}"
+        )
+source = source.strip()
+source_ready = source_ready and bool(source)
 cfg.video.source = source
+if preset != "Demo sintetica" and source_ready:
+    cfg.video.clip_id = (
+        None if source.lower().startswith(("rtsp://", "rtsps://")) else Path(source).stem
+    )
+    if cfg.events.coordinate_mode == "image" and cfg.video.clip_id:
+        camera_stem = cfg.video.clip_id
+        if Path(source).is_relative_to(cfg.project.root_dir / "data/raw/ACCIDENT"):
+            camera_stem = re.sub(r"_\d{2}$", "", camera_stem)
+        camera_name = re.sub(r"[^a-zA-Z0-9_-]", "_", camera_stem)[:80]
+        cfg.calibration.camera_id = "source_" + camera_name
+if st.session_state.get("calibration_source") != source:
+    st.session_state.pop("calibration_frame", None)
+    st.session_state.pop("proposal", None)
+    st.session_state["calibration_source"] = source
 st.sidebar.caption(f"Backend: {cfg.perception.backend} · {cfg.video.target_fps:g} FPS richiesti")
 if cfg.perception.backend == "synthetic":
     st.warning(
@@ -96,7 +176,9 @@ with tab_analysis:
     status_slot = st.empty()
     metric_slot = st.empty()
     # Streamlit reruns cancel the current script; Pipeline.finally flushes clips.
-    if st.button("Avvia analisi", type="primary"):
+    if not source_ready:
+        st.info("Seleziona o carica un video per avviare l'analisi.")
+    if st.button("Avvia analisi", type="primary", disabled=not source_ready):
         try:
 
             def update(data):
@@ -202,14 +284,14 @@ with tab_calibration:
     st.write(
         "Inserire almeno quattro corrispondenze sul piano stradale, nello stesso ordine nelle due liste. Le coordinate metriche devono derivare da misure reali."
     )
-    if st.button("Estrai primo frame"):
+    if st.button("Estrai primo frame", disabled=not source_ready):
         try:
             with av.open(source) as container:
                 frame = next(container.decode(video=0)).to_ndarray(format="bgr24")
                 st.session_state["calibration_frame"] = frame
         except Exception as exc:
             st.error(str(exc))
-    if st.button("Calcola sfondo mediano"):
+    if st.button("Calcola sfondo mediano", disabled=not source_ready):
         try:
             background, unstable, original_size = sample_background(source)
             st.session_state["calibration_frame"] = cv2.resize(background, original_size)

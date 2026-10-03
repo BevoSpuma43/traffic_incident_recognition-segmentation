@@ -63,6 +63,23 @@ sagoma e salti del punto della maschera su bbox ferme vengono filtrati.
 I risultati verificati sui video segnalati sono in
 [docs/real-video-validation.md](docs/real-video-validation.md).
 
+## Scegliere un video dal frontend
+
+Selezionare **Video reale senza calibrazione** e scegliere la **Sorgente video**:
+
+- **Carica un video** apre la selezione dei file del computer, fino a 1 GB per file.
+  Sono accettati MP4, AVI, MOV, MKV, WebM e altri formati video comuni.
+- **Video del dataset ACCIDENT** mostra tutti i video locali del dataset: digitare
+  il nome nel menu per cercare il file, anche fuori dal campione di dieci clip.
+- **Percorso o URL RTSP** permette di indicare un file locale, anche oltre il limite
+  di caricamento, o uno stream RTSP.
+
+Scegliere Rapida o Accurata e premere **Avvia analisi**. Il caricamento e disponibile
+anche nella modalita con calibrazione metrica. I file caricati restano in
+`data/uploads/` per consentire i replay successivi. Video diversi con lo stesso
+nome vengono conservati separatamente. La decodifica dipende dai codec supportati
+nell'ambiente; il risultato annotato viene esportato in MP4.
+
 ## Rivedere un'analisi
 
 Al termine dell'analisi, la scheda **Rivedi analisi** offre un video completo con

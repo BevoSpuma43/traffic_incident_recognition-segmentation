@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 outputs/
 data/raw/*
+data/uploads/
 data/processed/*
 data/samples/*
 data/calibration/*
