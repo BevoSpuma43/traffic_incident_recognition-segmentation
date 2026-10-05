@@ -14,3 +14,4 @@ models/**/*.onnx
 models/**/*.engine
 models/exported/*/
 *.egg-info/
+*.mp4

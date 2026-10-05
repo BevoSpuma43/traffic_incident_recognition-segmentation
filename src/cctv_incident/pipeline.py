@@ -69,7 +69,7 @@ class Pipeline:
         self.segmenter = segmenter
         self.summary = None
 
-    def run(self, callback=None, stop_requested=None):
+    def run(self, callback=None, stop_requested=None, progress_callback=None):
         cfg = self.config
         np.random.seed(cfg.project.seed)
         cv2.setRNGSeed(cfg.project.seed)
@@ -152,6 +152,8 @@ class Pipeline:
         peak_rss = 0
         guard = None
         failure = None
+        stopped = False
+        exhausted = False
         process = psutil.Process()
         cpu_start = process.cpu_times()
 
@@ -177,10 +179,12 @@ class Pipeline:
                 iterator = iter(source)
                 while True:
                     if stop_requested and stop_requested():
+                        stopped = True
                         break
                     with profiler.measure("decode"):
                         packet = next(iterator, None)
                     if packet is None:
+                        exhausted = True
                         break
                     if decoded == 0:
                         media_start = packet.timestamp_s
@@ -376,6 +380,15 @@ class Pipeline:
                                 }
                             )
                     processed += 1
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "timestamp_s": packet.timestamp_s,
+                                "duration_s": source.duration_s,
+                                "processed_frames": processed,
+                                "run_id": run_id,
+                            }
+                        )
                     duration = time.perf_counter() - frame_started
                     profiler.samples["end_to_end"].append(duration)
                     profiler.totals["end_to_end"] += duration
@@ -415,6 +428,8 @@ class Pipeline:
                 "max_simultaneous_tracks": max_tracks,
                 "state_counts": state_counts,
                 "error": failure,
+                "stopped": stopped,
+                "completed": exhausted and not failure and decoded > 0,
                 "timings": profiler.summary(),
                 "synthetic": metadata["synthetic"],
             }

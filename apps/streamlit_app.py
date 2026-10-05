@@ -31,12 +31,25 @@ def dataset_video_options(root):
 
 preset = st.sidebar.selectbox(
     "Modalita",
-    ["Demo sintetica", "Video reale senza calibrazione", "Video con calibrazione metrica"],
+    [
+        "Demo sintetica",
+        "Video reale senza calibrazione",
+        "Video con calibrazione metrica",
+        "standard_dataset analisi in batch - no omografia",
+        "standard_dataset analisi in batch - con omografia",
+    ],
 )
+if preset == "standard_dataset analisi in batch - con omografia":
+    st.info(
+        "Analisi in batch con omografia: funzionalità prevista per una prossima implementazione."
+    )
+    st.stop()
+
 default_configs = {
     "Demo sintetica": "configs/demo.yaml",
     "Video reale senza calibrazione": "configs/accident-image.yaml",
     "Video con calibrazione metrica": "configs/default.yaml",
+    "standard_dataset analisi in batch - no omografia": "configs/accident-image.yaml",
 }
 config_path = st.sidebar.text_input(
     "Configurazione YAML", default_configs[preset], key=f"config_{preset}"
@@ -45,6 +58,11 @@ try:
     cfg = load_config(config_path)
 except Exception as exc:
     st.error(str(exc))
+    st.stop()
+if preset == "standard_dataset analisi in batch - no omografia":
+    from cctv_incident.batch_ui import render_batch_page
+
+    render_batch_page(cfg)
     st.stop()
 if cfg.events.coordinate_mode == "image":
     st.info(

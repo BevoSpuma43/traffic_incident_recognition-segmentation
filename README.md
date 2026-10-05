@@ -82,6 +82,14 @@ nell'ambiente; il risultato annotato viene esportato in MP4.
 
 ## Rivedere un'analisi
 
+Per elaborare una cartella intera con checkpoint, selezionare **standard_dataset analisi in batch - no omografia**:
+scegliere cartella e modello locale, premere **Prepara batch**, poi **Avvia batch**.
+**Stop** interrompe il video corrente; **Riprendi** salta quelli completati e ricomincia
+il video interrotto. Risultati e checkpoint sono separati per modello/configurazione in
+`outputs/batches/`. Sono disponibili CSV per video, per evento e metriche aggregate,
+con confronto temporale entro **±1 secondo**. Procedura e definizioni di TP/FP/FN/TN:
+[analisi batch](docs/batch-analysis.md).
+
 Al termine dell'analisi, la scheda **Rivedi analisi** offre un video completo con
 bounding box, ID, traiettorie e velocità. La barra del lettore permette di scorrere
 il video; **Scarica video annotato** salva una copia MP4. Il video mantiene i
