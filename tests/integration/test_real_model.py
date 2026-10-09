@@ -25,7 +25,6 @@ def test_local_yolo_returns_vehicle_masks():
 def test_real_yolo_video_serializes_trajectories(tmp_path, config):
     import json
 
-    from cctv_incident.calibration import estimate_calibration
     from cctv_incident.pipeline import Pipeline
 
     path = Path("models/yolo26n-seg.pt").resolve()
@@ -41,12 +40,9 @@ def test_real_yolo_video_serializes_trajectories(tmp_path, config):
     for _ in range(5):
         writer.write(image)
     writer.release()
-    points = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]]
-    calibration = estimate_calibration(
-        "camera_01", (width, height), points, points, units="canonical"
-    )
-    config.calibration.file = tmp_path / "calibration.yaml"
-    calibration.save(config.calibration.file)
+    # This fixture has no measured road geometry. Exercise serialization in pixels;
+    # canonical coordinates are deliberately rejected by the metric preflight.
+    config.events.coordinate_mode = "image"
     config.calibration.detect_camera_motion = False
     config.video.source = str(video)
     config.perception.model = path
@@ -59,3 +55,4 @@ def test_real_yolo_video_serializes_trajectories(tmp_path, config):
     ]
     assert len(rows) >= 4
     assert all(isinstance(row["quality"], float) for row in rows)
+    assert all(row["coordinate_units"] == "px" and row["point_world"] is None for row in rows)

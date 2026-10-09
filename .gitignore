@@ -15,3 +15,4 @@ models/**/*.engine
 models/exported/*/
 *.egg-info/
 *.mp4
+*.zip

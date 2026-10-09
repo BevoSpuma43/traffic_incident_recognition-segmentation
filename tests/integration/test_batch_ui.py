@@ -69,6 +69,11 @@ def test_folder_model_selection_controls_progress_and_saved_resume(tmp_path, mon
     button(app, "Prepara batch").click().run(timeout=20)
     assert not app.exception
     first = app.session_state["batch_selected_job"]
+    settings = batch.read_json(Path(first) / "batch_config.json")
+    assert settings["mode"] == "standard_dataset analisi in batch - no omografia"
+    assert settings["configuration_yaml"] == str(Path("configs/accident-image.yaml").resolve())
+    assert settings["dataset_selection"] == "standard_dataset"
+    assert settings["video_directory"] == str(folder)
     button(app, "Avvia batch").click().run(timeout=20)
     assert not app.exception
     assert any("Video 1/1" in x.value and "a.mp4" in x.value for x in app.markdown)

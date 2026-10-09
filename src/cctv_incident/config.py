@@ -60,6 +60,8 @@ class Tracking(Settings):
 class CalibrationSettings(Settings):
     camera_id: str = Field("camera_01", pattern=r"^[a-zA-Z0-9_-]+$")
     file: Path = Path("data/calibration/camera_01.yaml")
+    expected_record_id: str | None = Field(None, pattern=r"^[0-9a-f]{32}$")
+    expected_revision: int | None = Field(None, ge=1)
     min_confidence: float = Field(0.55, ge=0, le=1)
     detect_camera_motion: bool = True
     motion_threshold_px: float = Field(8, gt=0)

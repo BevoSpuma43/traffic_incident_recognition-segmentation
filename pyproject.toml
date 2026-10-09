@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 inference = ["ultralytics>=8.4,<9", "lap>=0.5.12", "torch>=2.6", "torchvision>=0.21"]
-ui = ["streamlit>=1.45,<2"]
+ui = ["streamlit>=1.63,<2"]
 ml = ["scikit-learn>=1.6,<2", "joblib>=1.4,<2"]
 onnx = ["onnx>=1.17", "onnxruntime>=1.20"]
 openvino = ["openvino>=2025.0", "nncf>=2.15"]
@@ -28,6 +28,16 @@ cctv-incident = "cctv_incident.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cctv_incident"]
+
+[tool.uv]
+# Use the installed Python: Windows application control blocks the uv-managed runtime here.
+python-preference = "only-system"
+# Validated native wheels for this Windows application-control policy.
+constraint-dependencies = [
+  "scipy==1.17.1; sys_platform == 'win32'",
+  "torch==2.9.1+cpu; sys_platform == 'win32'",
+  "torchvision==0.24.1+cpu; sys_platform == 'win32'",
+]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]

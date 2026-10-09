@@ -26,7 +26,7 @@ Dalla radice del progetto:
 .venv\Scripts\python.exe -m streamlit run apps/streamlit_app.py
 ```
 
-Nella UI scegliere **Video reale senza calibrazione**. Se esiste il manifest
+Nella UI scegliere **Solo Segmentazione**. Se esiste il manifest
 del benchmark, e disponibile anche il selettore delle sole clip del campione.
 Il comando `run` analizza un singolo video. Per una camera misurata resta
 disponibile `configs/default.yaml`, che richiede una calibrazione valida.

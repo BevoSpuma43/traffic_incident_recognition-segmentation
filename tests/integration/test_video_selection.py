@@ -28,7 +28,7 @@ def selected_app(tmp_path, monkeypatch):
     monkeypatch.setattr("cctv_incident.config.load_config", lambda path: cfg.model_copy(deep=True))
     app = AppTest.from_file(str(Path("apps/streamlit_app.py").resolve())).run(timeout=20)
     next(item for item in app.selectbox if item.label == "Modalita").select(
-        "Video reale senza calibrazione"
+        "Solo Segmentazione"
     ).run(timeout=20)
     assert not app.exception
     return app, cfg

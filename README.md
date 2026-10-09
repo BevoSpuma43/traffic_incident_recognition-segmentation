@@ -10,13 +10,20 @@ Lo stato verificato e i limiti sperimentali sono in [docs/implementation-status.
 
 ## Avvio su Windows
 
-Dalla radice del repository, con [uv](https://docs.astral.sh/uv/) disponibile:
+Dalla radice del repository, con [uv](https://docs.astral.sh/uv/) e Python 3.12
+installato da [python.org](https://www.python.org/downloads/windows/):
 
 ```powershell
 uv sync --frozen --extra inference --extra ui --extra ml --dev
 .venv\Scripts\python.exe scripts/download_model.py
 .venv\Scripts\cctv-incident.exe demo
 ```
+
+Il progetto usa Python 3.12 e configura `uv` con `python-preference = "only-system"`.
+Sul PC di sviluppo Windows blocca alcune DLL del Python gestito da `uv`; la
+procedura usa quindi l'interprete già installato sul sistema. In caso di errore
+`DLL load failed while importing _ssl`, vedere la
+[procedura di ripristino](docs/ripristino-python-windows.md).
 
 L'ultimo comando genera una scena sintetica positiva, la calibrazione e il risultato completo.
 Per visualizzarla durante l'elaborazione aggiungere `--show`; premere Q per chiudere.
@@ -36,6 +43,50 @@ Interfaccia completa, dopo l'installazione:
 ```powershell
 .venv\Scripts\python.exe -m streamlit run apps/streamlit_app.py
 ```
+
+Per **Segmentazione + omografia**, selezionare un video locale e completare
+la scheda **Calibrazione**: quattro punti trascinabili, dimensioni in metri
+con origine confermata e ROI separata. È possibile salvare una bozza e riprenderla;
+una calibrazione confermata va revisionata sul fotogramma prima del riuso.
+L'analisi si abilita dopo la conferma. Uso, verifiche e limiti:
+[editor di calibrazione](docs/fase-2-editor.md).
+
+Il pulsante **Calibrazione automatica** mostra subito la prima proposta con
+punti trascinabili e nasconde i controlli di inserimento manuale. Le alternative
+si applicano direttamente dal menu; le distanze disponibili o applicate da
+un preset scelto compaiono nei campi modificabili. Le misure sconosciute restano
+vuote. **Torna alla selezione manuale** riapre coordinate numeriche e ROI.
+
+L'espansore **Calibrazione dalle automobili · sperimentale** aggiunge una stima
+approssimativa del piano stradale da più sagome di auto e dimensioni ipotizzate
+modificabili. Il valore iniziale è 4,7 × 1,8 × 1,5 m, scelto per il progetto;
+non rappresenta una media statistica verificata del parco USA. Uso e limiti:
+[calibrazione dalle automobili](docs/calibrazione-dalle-automobili.md).
+
+La pipeline adatta la calibrazione alla risoluzione elaborata, conserva gli
+snapshot nel run e segnala gli esiti non valutabili dopo invalidazioni o
+interruzioni. La fase 4 è verificata con **231 test superati** nella `.venv`
+esistente, senza blocchi Windows. Restano controllo visivo nel browser e
+verifica dell'accuratezza fisica su misure reali:
+[implementazione, artefatti e collaudo](docs/fase-4-pipeline.md).
+
+La voce **standard_dataset analisi in batch - con omografia** ora permette
+la **preparazione delle calibrazioni**: sessioni persistenti, proposte in un
+worker separato con stop/ripresa, tabella degli stati ed editor condiviso.
+Le conferme restano individuali. Dopo la revisione, **Analisi batch** permette
+di creare esperimenti metrici con copie verificate delle calibrazioni, stop/ripresa
+e risultati separati per modalità e modello. Se la geometria diventa invalida,
+il video non viene conteggiato e occorre un nuovo esperimento.
+Guide: [preparazione](docs/fase-5-preparazione.md) e
+[batch metrico e snapshot](docs/fase-6-batch-metrico.md).
+
+La fase 7 aggiunge consultazione degli esperimenti storici anche senza pesi,
+blocco preventivo delle riprese incompatibili, esportazione separata e strumenti
+per campionamento/revisione e confronto controllato. Su 5 scene reali sono state
+generate proposte per 4: è copertura grezza, non accuratezza metrica. Mancano
+misure indipendenti, revisioni cronometrate e collaudo visivo della GUI; il
+confronto reale richiede calibrazioni confermate. Procedura e stato effettivo:
+[validazione della fase 7](docs/fase-7-validazione.md).
 
 Su Linux/macOS usare gli eseguibili in `.venv/bin/`; il lockfile e la configurazione
 PyTorch CPU sono stati verificati su Windows. Nessun servizio cloud è necessario.
@@ -65,7 +116,7 @@ I risultati verificati sui video segnalati sono in
 
 ## Scegliere un video dal frontend
 
-Selezionare **Video reale senza calibrazione** e scegliere la **Sorgente video**:
+Selezionare **Solo Segmentazione** e scegliere la **Sorgente video**:
 
 - **Carica un video** apre la selezione dei file del computer, fino a 1 GB per file.
   Sono accettati MP4, AVI, MOV, MKV, WebM e altri formati video comuni.
@@ -147,7 +198,7 @@ manuale. Due sole linee longitudinali non determinano una calibrazione metrica c
 ## Video reali senza calibrazione e campione ACCIDENT
 
 Per i video ACCIDENT usare `configs/accident-image.yaml`, oppure scegliere
-**Video reale senza calibrazione** nella UI. La nuova modalita usa coordinate
+**Solo Segmentazione** nella UI. La nuova modalita usa coordinate
 immagine e soglie relative ai veicoli.
 
 ```powershell

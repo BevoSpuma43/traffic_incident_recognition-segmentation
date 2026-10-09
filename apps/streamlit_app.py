@@ -32,37 +32,49 @@ def dataset_video_options(root):
 preset = st.sidebar.selectbox(
     "Modalita",
     [
-        "Demo sintetica",
-        "Video reale senza calibrazione",
-        "Video con calibrazione metrica",
+        "Solo Segmentazione",
+        "Segmentazione + omografia",
         "standard_dataset analisi in batch - no omografia",
         "standard_dataset analisi in batch - con omografia",
     ],
 )
-if preset == "standard_dataset analisi in batch - con omografia":
-    st.info(
-        "Analisi in batch con omografia: funzionalità prevista per una prossima implementazione."
-    )
-    st.stop()
-
 default_configs = {
-    "Demo sintetica": "configs/demo.yaml",
-    "Video reale senza calibrazione": "configs/accident-image.yaml",
-    "Video con calibrazione metrica": "configs/default.yaml",
+    "Solo Segmentazione": "configs/accident-image.yaml",
+    "Segmentazione + omografia": "configs/default.yaml",
     "standard_dataset analisi in batch - no omografia": "configs/accident-image.yaml",
+    "standard_dataset analisi in batch - con omografia": "configs/default.yaml",
 }
 config_path = st.sidebar.text_input(
     "Configurazione YAML", default_configs[preset], key=f"config_{preset}"
 )
 try:
     cfg = load_config(config_path)
+    if preset in {"Solo Segmentazione", "Segmentazione + omografia"}:
+        # The selected workflow remains authoritative when using a custom YAML.
+        cfg.events.coordinate_mode = "metric" if preset == "Segmentazione + omografia" else "image"
 except Exception as exc:
     st.error(str(exc))
+    st.stop()
+if preset == "standard_dataset analisi in batch - con omografia":
+    from cctv_incident.batch_ui import render_batch_page
+    from cctv_incident.calibration_preparation_ui import render_preparation_page
+
+    cfg.events.coordinate_mode = "metric"
+    stage = st.sidebar.radio(
+        "Batch con omografia",
+        ["Preparazione calibrazioni", "Analisi batch"],
+        key="metric_batch_stage",
+    )
+    if stage == "Preparazione calibrazioni":
+        render_preparation_page(cfg)
+    else:
+        render_batch_page(cfg, mode=preset, config_path=config_path)
     st.stop()
 if preset == "standard_dataset analisi in batch - no omografia":
     from cctv_incident.batch_ui import render_batch_page
 
-    render_batch_page(cfg)
+    cfg.events.coordinate_mode = "image"
+    render_batch_page(cfg, mode=preset, config_path=config_path)
     st.stop()
 if cfg.events.coordinate_mode == "image":
     st.info(
@@ -84,81 +96,76 @@ if cfg.events.coordinate_mode == "image" and cfg.perception.backend == "pytorch"
         cfg.perception.image_size = 640
         cfg.video.target_fps = 15
 source_ready = True
-if preset == "Demo sintetica":
+dataset_root = cfg.project.root_dir / "data/raw/ACCIDENT"
+source_options = ["Carica un video"]
+if dataset_root.is_dir():
+    source_options.append("Video del dataset ACCIDENT")
+source_options.append("Percorso o URL RTSP")
+default_source = (
+    "Video del dataset ACCIDENT"
+    if cfg.events.coordinate_mode == "image" and dataset_root.is_dir()
+    else "Percorso o URL RTSP"
+)
+source_mode = st.sidebar.radio(
+    "Sorgente video", source_options, index=source_options.index(default_source)
+)
+source = ""
+if source_mode == "Carica un video":
+    uploaded_video = st.sidebar.file_uploader(
+        "Scegli un video dal computer",
+        type=list(VIDEO_EXTENSIONS),
+        key="uploaded_video",
+        help=f"Fino a {st.get_option('server.maxUploadSize')} MB per file. "
+        "Il video viene conservato per poter rivedere le analisi.",
+    )
+    source_ready = uploaded_video is not None
+    if uploaded_video is not None:
+        upload_identity = (str(cfg.project.root_dir), uploaded_video.file_id)
+        saved_upload = st.session_state.get("saved_video_upload", {})
+        try:
+            if (
+                saved_upload.get("identity") != upload_identity
+                or not Path(saved_upload.get("path", "")).is_file()
+            ):
+                with uploaded_video.getbuffer() as content:
+                    uploaded_path = save_uploaded_video(
+                        uploaded_video.name, content, cfg.project.root_dir / "data/uploads"
+                    )
+                saved_upload = {"identity": upload_identity, "path": str(uploaded_path)}
+                st.session_state["saved_video_upload"] = saved_upload
+            source = saved_upload["path"]
+            st.sidebar.success(f"Video pronto: {uploaded_video.name}")
+        except (OSError, ValueError) as exc:
+            source_ready = False
+            st.sidebar.error(f"Impossibile caricare il video: {exc}")
+elif source_mode == "Video del dataset ACCIDENT":
+    video_options = dataset_video_options(str(dataset_root))
+    st.sidebar.caption(f"{len(video_options)} video disponibili. Cerca il nome nel menu.")
+    if video_options:
+        current_video = Path(cfg.video.source)
+        current_option = (
+            current_video.relative_to(dataset_root).as_posix()
+            if current_video.is_relative_to(dataset_root)
+            else None
+        )
+        selected_video = st.sidebar.selectbox(
+            "Video del dataset",
+            video_options,
+            index=video_options.index(current_option) if current_option in video_options else 0,
+            key="dataset_video",
+        )
+        source = str(dataset_root / selected_video)
+    else:
+        source_ready = False
+        st.sidebar.info("Nessun video trovato nel dataset.")
+else:
     source = st.sidebar.text_input(
         "Percorso video o URL RTSP", cfg.video.source, key=f"source_{cfg.video.source}"
     )
-else:
-    dataset_root = cfg.project.root_dir / "data/raw/ACCIDENT"
-    source_options = ["Carica un video"]
-    if dataset_root.is_dir():
-        source_options.append("Video del dataset ACCIDENT")
-    source_options.append("Percorso o URL RTSP")
-    default_source = (
-        "Video del dataset ACCIDENT"
-        if cfg.events.coordinate_mode == "image" and dataset_root.is_dir()
-        else "Percorso o URL RTSP"
-    )
-    source_mode = st.sidebar.radio(
-        "Sorgente video", source_options, index=source_options.index(default_source)
-    )
-    source = ""
-    if source_mode == "Carica un video":
-        uploaded_video = st.sidebar.file_uploader(
-            "Scegli un video dal computer",
-            type=list(VIDEO_EXTENSIONS),
-            key="uploaded_video",
-            help=f"Fino a {st.get_option('server.maxUploadSize')} MB per file. "
-            "Il video viene conservato per poter rivedere le analisi.",
-        )
-        source_ready = uploaded_video is not None
-        if uploaded_video is not None:
-            upload_identity = (str(cfg.project.root_dir), uploaded_video.file_id)
-            saved_upload = st.session_state.get("saved_video_upload", {})
-            try:
-                if (
-                    saved_upload.get("identity") != upload_identity
-                    or not Path(saved_upload.get("path", "")).is_file()
-                ):
-                    with uploaded_video.getbuffer() as content:
-                        uploaded_path = save_uploaded_video(
-                            uploaded_video.name, content, cfg.project.root_dir / "data/uploads"
-                        )
-                    saved_upload = {"identity": upload_identity, "path": str(uploaded_path)}
-                    st.session_state["saved_video_upload"] = saved_upload
-                source = saved_upload["path"]
-                st.sidebar.success(f"Video pronto: {uploaded_video.name}")
-            except (OSError, ValueError) as exc:
-                source_ready = False
-                st.sidebar.error(f"Impossibile caricare il video: {exc}")
-    elif source_mode == "Video del dataset ACCIDENT":
-        video_options = dataset_video_options(str(dataset_root))
-        st.sidebar.caption(f"{len(video_options)} video disponibili. Cerca il nome nel menu.")
-        if video_options:
-            current_video = Path(cfg.video.source)
-            current_option = (
-                current_video.relative_to(dataset_root).as_posix()
-                if current_video.is_relative_to(dataset_root)
-                else None
-            )
-            selected_video = st.sidebar.selectbox(
-                "Video del dataset",
-                video_options,
-                index=video_options.index(current_option) if current_option in video_options else 0,
-                key="dataset_video",
-            )
-            source = str(dataset_root / selected_video)
-        else:
-            source_ready = False
-            st.sidebar.info("Nessun video trovato nel dataset.")
-    else:
-        source = st.sidebar.text_input(
-            "Percorso video o URL RTSP", cfg.video.source, key=f"source_{cfg.video.source}"
-        )
 source = source.strip()
 source_ready = source_ready and bool(source)
 cfg.video.source = source
-if preset != "Demo sintetica" and source_ready:
+if source_ready:
     cfg.video.clip_id = (
         None if source.lower().startswith(("rtsp://", "rtsps://")) else Path(source).stem
     )
@@ -173,21 +180,26 @@ if st.session_state.get("calibration_source") != source:
     st.session_state.pop("proposal", None)
     st.session_state["calibration_source"] = source
 st.sidebar.caption(f"Backend: {cfg.perception.backend} · {cfg.video.target_fps:g} FPS richiesti")
-if cfg.perception.backend == "synthetic":
-    st.warning(
-        "Modalità sintetica: le maschere sono ricavate dai colori della demo. Per CCTV selezionare configs/default.yaml."
-    )
 tab_analysis, tab_replay, tab_calibration, tab_events = st.tabs(
     ["Analisi", "Rivedi analisi", "Calibrazione", "Eventi"]
 )
 
-with tab_analysis:
-    if st.button("Genera video dimostrativi"):
-        from cctv_incident.demo import generate_demo
+calibration_ready = True
+if cfg.events.coordinate_mode == "metric":
+    from cctv_incident.calibration_ui import render_calibration_editor
 
-        generate_demo(cfg.project.root_dir)
-        generate_demo(cfg.project.root_dir, negative=True)
-        st.success("Video positivo, negativo e calibrazione sintetica creati.")
+    with tab_calibration:
+        selection = render_calibration_editor(
+            source, cfg.project.root_dir, min_confidence=cfg.calibration.min_confidence
+        )
+    calibration_ready = selection.ready
+    if selection.ready:
+        cfg.calibration.file = selection.path
+        cfg.calibration.camera_id = selection.camera_id
+        cfg.calibration.expected_record_id = selection.record_id
+        cfg.calibration.expected_revision = selection.revision
+
+with tab_analysis:
     columns = st.columns([2, 1])
     video_slot = columns[0].empty()
     bird_slot = columns[1].empty()
@@ -196,7 +208,12 @@ with tab_analysis:
     # Streamlit reruns cancel the current script; Pipeline.finally flushes clips.
     if not source_ready:
         st.info("Seleziona o carica un video per avviare l'analisi.")
-    if st.button("Avvia analisi", type="primary", disabled=not source_ready):
+    elif not calibration_ready:
+        st.info("Completa e conferma la calibrazione del video nella scheda Calibrazione.")
+    if st.button(
+        "Avvia analisi", type="primary", disabled=not source_ready or not calibration_ready
+    ):
+        pipeline = None
         try:
 
             def update(data):
@@ -204,17 +221,31 @@ with tab_analysis:
                 if data["bird_eye"] is not None:
                     bird_slot.image(data["bird_eye"], channels="BGR")
                 decision = data["decision"]
-                status_slot.info(
-                    f"{decision.state} · Punteggio {decision.score:.2f} · "
-                    + ", ".join(decision.reasons)
-                )
+                if data.get("calibration_valid") is False:
+                    status_slot.warning(
+                        "Calibrazione non più valida: l'analisi non sarà valutabile. "
+                        "Controlla il movimento della camera e la risoluzione del video."
+                    )
+                else:
+                    status_slot.info(
+                        f"{decision.state} · Punteggio {decision.score:.2f} · "
+                        + ", ".join(decision.reasons)
+                    )
                 metric_slot.caption(
                     f"Tempo video {data['timestamp_s']:.2f} s · FPS effettivi {data['fps']:.1f}"
                 )
 
-            summary = Pipeline(cfg).run(update)
+            pipeline = Pipeline(cfg)
+            summary = pipeline.run(update)
             st.session_state["last_run"] = summary
-            st.success(f"Analisi completata: {summary['events']} eventi.")
+            if summary.get("evaluable") is False:
+                st.warning(
+                    "Analisi non valutabile: la calibrazione è diventata invalida o "
+                    "l'elaborazione non è terminata. L'assenza di allarmi non dimostra "
+                    "l'assenza di incidenti. Controlla il resoconto e ripeti l'analisi."
+                )
+            else:
+                st.success(f"Analisi completata: {summary['events']} eventi.")
             if not source.lower().startswith(("rtsp://", "rtsps://")):
                 try:
                     with st.spinner("Preparazione del video annotato..."):
@@ -223,6 +254,8 @@ with tab_analysis:
                 except Exception as exc:
                     st.warning(f"Analisi salvata, ma il video annotato non è pronto: {exc}")
         except Exception as exc:
+            if getattr(pipeline, "summary", None) is not None:
+                st.session_state["last_run"] = pipeline.summary
             st.error(f"Analisi interrotta: {exc}")
     if "last_run" in st.session_state:
         st.json(st.session_state["last_run"], expanded=False)
@@ -238,10 +271,17 @@ with tab_replay:
         def run_label(run_id):
             run = runs_by_id[run_id]
             date = datetime.fromtimestamp(run["modified_at"]).strftime("%d/%m/%Y %H:%M")
-            return f"{run['source_name']} · {date} · {run['events']} eventi"
+            outcome = f"{run['events']} eventi" if run["evaluable"] else "non valutabile"
+            return f"{run['source_name']} · {date} · {outcome}"
 
         selected_run = st.selectbox("Analisi da rivedere", list(runs_by_id), format_func=run_label)
         run_dir = Path(runs_by_id[selected_run]["run_dir"])
+        if not runs_by_id[selected_run]["evaluable"]:
+            st.warning(
+                "Questa analisi non è valutabile. Gli allarmi possono riferirsi solo "
+                "alla parte del video elaborata con calibrazione valida; zero allarmi "
+                "non certifica l'assenza di incidenti."
+            )
         replay_path = run_dir / "annotated.mp4"
         replay_report = run_dir / "replay.json"
         if not replay_path.is_file() or not replay_report.is_file():
@@ -283,7 +323,7 @@ with tab_replay:
                     st.info(
                         "Per alcuni eventi la posizione non è disponibile: è indicato solo il tempo."
                     )
-            else:
+            elif runs_by_id[selected_run]["evaluable"]:
                 st.info("Nessun impatto rilevato in questa analisi.")
             st.video(str(replay_path), start_time=start_time)
             st.caption(
@@ -298,79 +338,82 @@ with tab_replay:
                     key=f"download_{selected_run}",
                 )
 
-with tab_calibration:
-    st.write(
-        "Inserire almeno quattro corrispondenze sul piano stradale, nello stesso ordine nelle due liste. Le coordinate metriche devono derivare da misure reali."
-    )
-    if st.button("Estrai primo frame", disabled=not source_ready):
-        try:
-            with av.open(source) as container:
-                frame = next(container.decode(video=0)).to_ndarray(format="bgr24")
-                st.session_state["calibration_frame"] = frame
-        except Exception as exc:
-            st.error(str(exc))
-    if st.button("Calcola sfondo mediano", disabled=not source_ready):
-        try:
-            background, unstable, original_size = sample_background(source)
-            st.session_state["calibration_frame"] = cv2.resize(background, original_size)
-            st.image(unstable, caption="Aree instabili", clamp=True)
-        except Exception as exc:
-            st.error(str(exc))
-    frame = st.session_state.get("calibration_frame")
-    if frame is not None:
-        st.image(
-            frame,
-            channels="BGR",
-            caption=f"Coordinate in pixel: {frame.shape[1]} × {frame.shape[0]}",
+if cfg.events.coordinate_mode == "image":
+    with tab_calibration:
+        st.write(
+            "Inserire almeno quattro corrispondenze sul piano stradale, nello stesso ordine nelle due liste. Le coordinate metriche devono derivare da misure reali."
         )
-    source_text = st.text_area(
-        "Punti immagine [x, y] (JSON)", "[[100,100],[500,100],[500,300],[100,300]]"
-    )
-    destination_text = st.text_area(
-        "Punti sul piano stradale [x, y] (JSON)", "[[0,0],[10,0],[10,20],[0,20]]"
-    )
-    metric = st.checkbox("Coordinate misurate in metri", value=False)
-    target = st.text_input("File calibrazione", str(cfg.calibration.file))
-    if st.button("Salva calibrazione manuale"):
-        try:
+        if st.button("Estrai primo frame", disabled=not source_ready):
+            try:
+                with av.open(source) as container:
+                    frame = next(container.decode(video=0)).to_ndarray(format="bgr24")
+                    st.session_state["calibration_frame"] = frame
+            except Exception as exc:
+                st.error(str(exc))
+        if st.button("Calcola sfondo mediano", disabled=not source_ready):
+            try:
+                background, unstable, original_size = sample_background(source)
+                st.session_state["calibration_frame"] = cv2.resize(background, original_size)
+                st.image(unstable, caption="Aree instabili", clamp=True)
+            except Exception as exc:
+                st.error(str(exc))
+        frame = st.session_state.get("calibration_frame")
+        if frame is not None:
+            st.image(
+                frame,
+                channels="BGR",
+                caption=f"Coordinate in pixel: {frame.shape[1]} × {frame.shape[0]}",
+            )
+        source_text = st.text_area(
+            "Punti immagine [x, y] (JSON)", "[[100,100],[500,100],[500,300],[100,300]]"
+        )
+        destination_text = st.text_area(
+            "Punti sul piano stradale [x, y] (JSON)", "[[0,0],[10,0],[10,20],[0,20]]"
+        )
+        metric = st.checkbox("Coordinate misurate in metri", value=False)
+        target = st.text_input("File calibrazione", str(cfg.calibration.file))
+        if st.button("Salva calibrazione manuale"):
+            try:
+                if frame is None:
+                    raise ValueError("Estrarre prima un frame del video")
+                calibration = estimate_calibration(
+                    cfg.calibration.camera_id,
+                    (frame.shape[1], frame.shape[0]),
+                    json.loads(source_text),
+                    json.loads(destination_text),
+                    units="m" if metric else "canonical",
+                )
+                reference_path = Path(target).with_suffix(".reference.jpg")
+                reference_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(reference_path), frame)
+                calibration.reference_image = reference_path.name
+                calibration.save(target)
+                st.success("Calibrazione salvata.")
+            except Exception as exc:
+                st.error(str(exc))
+        st.write(
+            "La proposta automatica individua intersezioni delle strisce. Verificare i vertici e fornire misure prima di usarla per il detector."
+        )
+        if st.button("Proponi calibrazione dalle strisce"):
             if frame is None:
-                raise ValueError("Estrarre prima un frame del video")
-            calibration = estimate_calibration(
-                cfg.calibration.camera_id,
-                (frame.shape[1], frame.shape[0]),
-                json.loads(source_text),
-                json.loads(destination_text),
-                units="m" if metric else "canonical",
+                st.error("Estrarre prima un frame.")
+            else:
+                proposal, diagnostics, mask, lines = propose_calibration(
+                    frame, cfg.calibration.camera_id
+                )
+                st.image(
+                    [mask, cv2.cvtColor(lines, cv2.COLOR_BGR2RGB)], caption=["Strisce", "Linee"]
+                )
+                st.json(diagnostics)
+                if proposal:
+                    st.session_state["proposal"] = proposal.model_dump()
+        if "proposal" in st.session_state:
+            st.code(json.dumps(st.session_state["proposal"]["source_points_px"]))
+            st.caption(
+                "Copiare o correggere questi punti nel modulo manuale e assegnare coordinate misurate."
             )
-            reference_path = Path(target).with_suffix(".reference.jpg")
-            reference_path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(reference_path), frame)
-            calibration.reference_image = reference_path.name
-            calibration.save(target)
-            st.success("Calibrazione salvata.")
-        except Exception as exc:
-            st.error(str(exc))
-    st.write(
-        "La proposta automatica individua intersezioni delle strisce. Verificare i vertici e fornire misure prima di usarla per il detector."
-    )
-    if st.button("Proponi calibrazione dalle strisce"):
-        if frame is None:
-            st.error("Estrarre prima un frame.")
-        else:
-            proposal, diagnostics, mask, lines = propose_calibration(
-                frame, cfg.calibration.camera_id
-            )
-            st.image([mask, cv2.cvtColor(lines, cv2.COLOR_BGR2RGB)], caption=["Strisce", "Linee"])
-            st.json(diagnostics)
-            if proposal:
-                st.session_state["proposal"] = proposal.model_dump()
-    if "proposal" in st.session_state:
-        st.code(json.dumps(st.session_state["proposal"]["source_points_px"]))
-        st.caption(
-            "Copiare o correggere questi punti nel modulo manuale e assegnare coordinate misurate."
-        )
-    if Path(target).exists():
-        st.json(load_calibration(target).model_dump(), expanded=False)
+        if Path(target).exists():
+            st.json(load_calibration(target).model_dump(), expanded=False)
 
 with tab_events:
     storage = EventStorage(cfg.project.output_dir)

@@ -10,14 +10,20 @@ from .batch import (
     list_jobs,
     prepare_job,
     read_json,
+    resume_compatibility,
     snapshot,
     start_job,
     stop_job,
     worker_alive,
 )
+from .calibration.batch_snapshot import archive_mapping
+from .video_inputs import list_dataset_videos
 
 
-def render_batch_page(cfg):
+def render_batch_page(cfg, *, mode, config_path):
+    metric = cfg.events.coordinate_mode == "metric"
+    prefix = "metric_" if metric else ""
+    selection_key = prefix + "batch_selected_job"
     root = cfg.project.root_dir
     output_root = root / "outputs/batches"
     st.subheader("Analisi sequenziale della cartella")
@@ -30,16 +36,31 @@ def render_batch_page(cfg):
         "Riprendi salta i video completati e ricomincia dall'inizio del video interrotto. "
         "Chiudere la pagina non arresta il processo: usa Stop prima di spegnere il computer."
     )
-    models = sorted((root / "models").rglob("*.pt"))
+    jobs = list_jobs(output_root)
+    models = sorted(
+        set((root / "models").rglob("*.pt"))
+        | {
+            Path(item["model_path"])
+            for item in jobs
+            if item["coordinate_mode"] == cfg.events.coordinate_mode
+        }
+    )
     if not models:
         st.error("Nessun modello .pt disponibile nella cartella models.")
         return
     model = st.sidebar.selectbox(
         "Modello YOLO",
         models,
-        format_func=lambda p: p.relative_to(root / "models").as_posix(),
+        format_func=lambda p: (
+            (
+                p.relative_to(root / "models").as_posix()
+                if p.is_relative_to(root / "models")
+                else str(p)
+            )
+            + (" (pesi non disponibili)" if not p.is_file() else "")
+        ),
         index=next((i for i, p in enumerate(models) if p.name == "yolo26s-seg.pt"), 0),
-        key="batch_model",
+        key=prefix + "batch_model",
         help="Servono pesi di segmentazione. Ogni modello conserva risultati e checkpoint propri.",
     )
     dataset = root / "dataset"
@@ -53,34 +74,70 @@ def render_batch_page(cfg):
         index=choices.index("standard_dataset")
         if "standard_dataset" in choices
         else len(choices) - 1,
+        key=prefix + "batch_dataset",
     )
     folder = st.sidebar.text_input(
         "Cartella video",
         str(dataset / selected) if selected in directories else str(dataset),
-        key=f"batch_folder_{selected}",
+        key=f"{prefix}batch_folder_{selected}",
     )
-    metadata = st.sidebar.text_input("CSV delle etichette", str(dataset / "metadata-real.csv"))
-    fps = st.sidebar.number_input("FPS da analizzare", min_value=1.0, max_value=60.0, value=8.0)
+    metadata = st.sidebar.text_input(
+        "CSV delle etichette", str(dataset / "metadata-real.csv"), key=prefix + "batch_metadata"
+    )
+    fps = st.sidebar.number_input(
+        "FPS da analizzare", min_value=1.0, max_value=60.0, value=8.0, key=prefix + "batch_fps"
+    )
     st.sidebar.caption("Mantieni gli stessi FPS e parametri per confrontare i modelli.")
+    st.caption(
+        "Prepara batch crea sempre un nuovo esperimento in una cartella separata. "
+        "Per continuare un esperimento esistente, selezionalo sotto e usa Riprendi."
+    )
     cfg = cfg.model_copy(deep=True)
     cfg.perception.model = model
     cfg.perception.backend = "pytorch"
     cfg.video.target_fps = fps
-    if st.button("Prepara batch", type="primary"):
+    if metric:
+        st.info(
+            "Ogni video deve avere una calibrazione confermata e compatibile. "
+            "Prepara batch verifica l'intera cartella e salva copie indipendenti; "
+            "se manca una calibrazione, torna a Preparazione calibrazioni."
+        )
+    if st.button(
+        "Prepara batch", type="primary", key=prefix + "batch_prepare", disabled=not model.is_file()
+    ):
         try:
             with st.spinner("Verifica video, etichette e modello..."):
-                job = prepare_job(cfg, folder, metadata, output_root, tolerance_s=1.0)
-            st.session_state["batch_selected_job"] = str(job)
-            st.success("Batch pronto. Premi Avvia batch oppure Riprendi se esiste un checkpoint.")
+                calibration_map = (
+                    archive_mapping(folder, root, list_dataset_videos(folder)) if metric else None
+                )
+                job = prepare_job(
+                    cfg,
+                    folder,
+                    metadata,
+                    output_root,
+                    tolerance_s=1.0,
+                    mode=mode,
+                    config_path=config_path,
+                    dataset_directory=dataset,
+                    dataset_selection=selected,
+                    calibration_map=calibration_map,
+                )
+            st.session_state[selection_key] = str(job)
+            st.success("Nuovo batch pronto: configurazione salvata. Premi Avvia batch.")
         except (OSError, ValueError, RuntimeError) as exc:
             st.error(str(exc))
 
     jobs = list_jobs(output_root)
-    matching = [item for item in jobs if Path(item["model_path"]) == model]
+    matching = [
+        item
+        for item in jobs
+        if Path(item["model_path"]) == model
+        and item["coordinate_mode"] == cfg.events.coordinate_mode
+    ]
     if matching:
         options = {item["path"]: item for item in matching}
-        if st.session_state.get("batch_selected_job") not in options:
-            st.session_state["batch_selected_job"] = matching[0]["path"]
+        if st.session_state.get(selection_key) not in options:
+            st.session_state[selection_key] = matching[0]["path"]
 
         def job_label(path):
             item = options[path]
@@ -91,9 +148,19 @@ def render_batch_page(cfg):
             "Esperimento salvato per questo modello",
             list(options),
             format_func=job_label,
-            key="batch_selected_job",
+            key=selection_key,
         )
         manifest = read_json(Path(selected_job) / "manifest.json")
+        if "batch_settings" in manifest:
+            with st.expander("Configurazione salvata dell'esperimento"):
+                settings = manifest["batch_settings"]
+                st.json(
+                    {
+                        key: value
+                        for key, value in settings.items()
+                        if key != "resolved_configuration"
+                    }
+                )
         st.caption(
             f"Esperimento selezionato: {manifest['folder']} · "
             f"{manifest['config']['video']['target_fps']:g} FPS · "
@@ -109,11 +176,11 @@ def render_batch_page(cfg):
     else:
         selected_job = None
         st.info("Prepara la cartella per creare il primo esperimento di questo modello.")
-    batch_monitor(selected_job, str(output_root))
+    batch_monitor(selected_job, str(output_root), prefix)
 
 
 @st.fragment(run_every=1.0)
-def batch_monitor(selected_job, output_root):
+def batch_monitor(selected_job, output_root, prefix=""):
     jobs = list_jobs(output_root)
     active = [item for item in jobs if worker_alive(item["path"])]
     for item in active:
@@ -127,13 +194,26 @@ def batch_monitor(selected_job, output_root):
     job = Path(selected_job)
     state = snapshot(job)
     finished = state["status"] == "completed"
+    invalid = state.get("requires_new_experiment", False)
+    compatible, compatibility_message = resume_compatibility(job)
+    if not compatible:
+        st.warning(compatibility_message)
+    widget_prefix = prefix + job.name + "_"
     busy = bool(active)
     buttons = st.columns(3)
     begin = buttons[0].button(
-        "Avvia batch", disabled=busy or finished or state["status"] != "ready"
+        "Avvia batch",
+        disabled=busy or finished or invalid or not compatible or state["status"] != "ready",
+        key=widget_prefix + "start",
     )
-    resume = buttons[1].button("Riprendi", disabled=busy or finished or state["status"] == "ready")
-    stop = buttons[2].button("Stop", disabled=not state["active"] or state["stop_requested"])
+    resume = buttons[1].button(
+        "Riprendi",
+        disabled=busy or finished or invalid or not compatible or state["status"] == "ready",
+        key=widget_prefix + "resume",
+    )
+    stop = buttons[2].button(
+        "Stop", disabled=not state["active"] or state["stop_requested"], key=widget_prefix + "stop"
+    )
     if begin or resume:
         try:
             start_job(job)
@@ -157,6 +237,10 @@ def batch_monitor(selected_job, output_root):
         if state["active"] and state["stop_requested"]
         else statuses[state["status"]]
     )
+    if invalid:
+        status = "Calibrazione invalidata: serve un nuovo esperimento"
+    elif not compatible and not state["active"] and not finished:
+        status = "Consultabile; ripresa con il codice originale"
     st.write(f"**{status}** · {state['completed_videos']}/{state['total_videos']} video completati")
     st.progress(
         state["completed_videos"] / state["total_videos"], text="Avanzamento della cartella"
@@ -191,9 +275,9 @@ def batch_monitor(selected_job, output_root):
             (job / filename).read_bytes(),
             file_name=f"{job.name}-{filename}",
             mime="text/csv",
-            key=f"download_batch_{filename}",
+            key=f"{widget_prefix}download_batch_{filename}",
         )
-    if st.checkbox("Mostra confronto tra esperimenti", key="batch_comparison"):
+    if st.checkbox("Mostra confronto tra esperimenti", key=prefix + "batch_comparison"):
         comparison = []
         for item in jobs:
             report = read_json(Path(item["path"]) / "metrics.json")
@@ -201,6 +285,7 @@ def batch_monitor(selected_job, output_root):
                 {
                     "Esperimento": Path(item["path"]).name,
                     "Modello": item["model_name"],
+                    "Modalità": item["coordinate_mode"] or "Non registrata",
                     "Cartella": item["folder"],
                     "Video completati": report["completed_videos"],
                     "Video totali": report["total_videos"],

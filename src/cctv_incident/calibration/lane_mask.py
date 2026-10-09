@@ -3,14 +3,17 @@ import numpy as np
 from skimage.morphology import skeletonize
 
 
-def lane_mask(image, roi=None):
+def lane_mask(image, roi=None, *, retain_wide=False):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     light = cv2.createCLAHE(2.0, (8, 8)).apply(lab[:, :, 0])
     white = (hsv[:, :, 1] < 65) & (light > 185)
     yellow = (hsv[:, :, 0] > 15) & (hsv[:, :, 0] < 40) & (hsv[:, :, 1] > 70) & (light > 110)
     top_hat = cv2.morphologyEx(light, cv2.MORPH_TOPHAT, np.ones((15, 15), np.uint8))
-    mask = ((white | yellow) & (top_hat > 15)).astype(np.uint8) * 255
+    # Closed painted bars need their interiors; top-hat alone removes markings
+    # wider than its kernel. Keep the legacy narrow-stripe default unchanged.
+    selected = (white | yellow) if retain_wide else ((white | yellow) & (top_hat > 15))
+    mask = selected.astype(np.uint8) * 255
     road = np.zeros(mask.shape, np.uint8)
     if roi is None:
         road[mask.shape[0] // 3 :] = 255

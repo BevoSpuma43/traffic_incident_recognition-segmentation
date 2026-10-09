@@ -1,5 +1,16 @@
 # Analisi sequenziale con checkpoint
 
+Il batch con omografia è disponibile dopo la conferma delle calibrazioni:
+selezionare **standard_dataset analisi in batch - con omografia → Analisi batch**.
+Usa copie locali verificate delle calibrazioni e conserva esperimenti separati
+per modalità e modello. Procedura e limiti: [batch metrico](fase-6-batch-metrico.md).
+Le istruzioni seguenti descrivono il batch in coordinate immagine.
+
+Per esperimenti storici, la GUI mantiene consultazione e download anche se i
+pesi sono mancanti; la ripresa con codice diverso viene bloccata prima di
+modificare il job. Per esportare in una cartella separata e confrontare due
+modalità con controlli sugli input, vedere la [fase 7](fase-7-validazione.md).
+
 Avviare l'interfaccia dalla radice del progetto:
 
 ```powershell
@@ -15,6 +26,15 @@ Avviare l'interfaccia dalla radice del progetto:
    Tutti i modelli partono da 8 FPS, immagine 640 e configurazione
    `configs/accident-image.yaml`. Per confrontarli mantenere gli stessi parametri.
 5. Premere **Prepara batch**, poi **Avvia batch**.
+
+Ogni pressione di **Prepara batch** crea un nuovo esperimento, anche con gli stessi
+video e parametri. La directory ha il formato `<modello>-<data-UTC>-<ID-univoco>`.
+**Riprendi** usa invece la cartella e la configurazione dell'esperimento selezionato.
+In ogni nuova cartella vengono salvati `batch_config.json` (modalità, percorso dello
+YAML, modello, directory del dataset, scelta del menu cartella, directory video,
+CSV delle etichette e FPS), `source_config.yaml` (copia dello YAML originale) e
+`resolved_config.yaml` (configurazione effettiva, comprese le scelte della GUI).
+La configurazione è consultabile anche nell'espansore della GUI.
 
 La voce **standard_dataset analisi in batch - con omografia** è per ora un
 segnaposto: mostra un messaggio e non avvia elaborazioni. È riservata al futuro
@@ -45,6 +65,12 @@ Tentativi interrotti o falliti restano nei log della pipeline ma non vengono
 conteggiati. Un errore di decodifica o inferenza ferma il batch sul video interessato;
 non viene trasformato in un falso negativo. I CSV si rigenerano dai risultati
 completi alla ripresa, anche dopo un'interruzione durante l'esportazione.
+
+Su Windows, un lettore può bloccare brevemente la sostituzione del checkpoint.
+I salvataggi atomici ritentano soltanto gli errori Windows 5 e 32, fino a otto
+tentativi con attese crescenti (1,95 secondi complessivi). Se il blocco persiste,
+l'errore viene propagato: non si sovrascrive direttamente il file e non si
+considera riuscito un salvataggio fallito.
 
 L'esperimento conserva un manifest con elenco ordinato dei video, dimensioni e
 date di modifica, hash dei pesi e dei metadati, configurazione e hash del codice.
@@ -114,6 +140,9 @@ Ogni modello/configurazione/sottoinsieme ha una directory distinta:
 ```text
 outputs/batches/<modello>-<identificatore>/
   manifest.json       configurazione e protocollo congelati
+  batch_config.json   impostazioni scelte nella GUI e configurazione effettiva
+  source_config.yaml  copia dello YAML selezionato
+  resolved_config.yaml parametri effettivi dopo le scelte nella GUI
   checkpoint.json     stato e progresso corrente
   results/*.json      un risultato definitivo per video completato
   videos.csv          etichetta, predizione binaria, esito, conteggi eventi, timestamp

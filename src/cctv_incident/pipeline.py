@@ -11,9 +11,10 @@ import cv2
 import numpy as np
 import psutil
 
-from .calibration import load_calibration
+from .calibration.coordinates import ImageTransform
 from .calibration.homography import image_reference
 from .calibration.quality import CameraMotionGuard
+from .calibration.runtime import load_run_calibration
 from .clip_buffer import ClipBuffer
 from .event_detector import EventDetector
 from .features import compute_pairs
@@ -74,19 +75,9 @@ class Pipeline:
         np.random.seed(cfg.project.seed)
         cv2.setRNGSeed(cfg.project.seed)
         image_mode = cfg.events.coordinate_mode == "image"
-        calibration = None if image_mode else load_calibration(cfg.calibration.file)
-        if calibration is not None and calibration.camera_id != cfg.calibration.camera_id:
-            raise ValueError("Calibration camera_id differs from configuration")
-        if calibration is not None and (not calibration.valid or not calibration.accepted):
-            raise ValueError("Accept or correct the camera calibration before starting")
-        if calibration is not None and calibration.confidence < cfg.calibration.min_confidence:
-            raise ValueError("Calibration confidence is below the configured minimum")
-        reference = None
-        if calibration is not None and calibration.reference_image:
-            reference_path = (cfg.calibration.file.parent / calibration.reference_image).resolve()
-            reference = cv2.imread(str(reference_path))
-            if reference is None:
-                raise ValueError(f"Calibration reference image missing: {reference_path}")
+        calibration_input = None if image_mode else load_run_calibration(cfg)
+        calibration = calibration_input.original if calibration_input else None
+        reference = calibration_input.reference if calibration_input else None
 
         run_id = uuid4().hex[:16]
         clip_id = cfg.video.clip_id or (
@@ -97,6 +88,8 @@ class Pipeline:
         output = cfg.project.output_dir
         run_dir = output / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        if calibration_input:
+            calibration_input.write_original(run_dir)
         profiler = Profiler()
         started = time.perf_counter()
         segmenter = self.segmenter or create_segmenter(cfg.perception)
@@ -135,6 +128,7 @@ class Pipeline:
             "config": cfg.model_dump(mode="json"),
             "calibration": calibration.model_dump(mode="json") if calibration else None,
             "coordinate_mode": cfg.events.coordinate_mode,
+            "calibration_provenance": calibration_input.provenance() if calibration_input else None,
             "hardware": hardware_info(),
             "model_sha256": hash_file(cfg.perception.model),
             "versions": {
@@ -151,11 +145,26 @@ class Pipeline:
         media_start = media_end = 0.0
         peak_rss = 0
         guard = None
+        native_size = None
+        invalidations = []
         failure = None
         stopped = False
         exhausted = False
         process = psutil.Process()
         cpu_start = process.cpu_times()
+
+        def invalidate_calibration(reason, packet):
+            if calibration.valid:
+                invalidations.append(
+                    {
+                        "reason": reason,
+                        "timestamp_s": packet.timestamp_s,
+                        "frame_index": packet.frame_index,
+                    }
+                )
+                calibration.valid = False
+                trajectories.histories.clear()
+                detector.reset()
 
         def save_completed(events):
             for event in events:
@@ -189,11 +198,32 @@ class Pipeline:
                     if decoded == 0:
                         media_start = packet.timestamp_s
                         actual_size = (packet.image.shape[1], packet.image.shape[0])
+                        native_size = (
+                            packet.original_image_size or source.original_image_size or actual_size
+                        )
+                        motion_threshold = cfg.calibration.motion_threshold_px
                         if image_mode:
                             calibration = image_reference(cfg.calibration.camera_id, actual_size)
                             calibration.save(run_dir / "image-reference.yaml")
+                        else:
+                            calibration, transform, reference, basis = calibration_input.adapt(
+                                native_size, actual_size
+                            )
+                            motion_threshold = transform.adapt_motion_threshold(motion_threshold)
+                            calibration_input.write_effective(run_dir, calibration, reference)
+                            metadata["calibration_transform"] = {
+                                **asdict(transform),
+                                "matrix": transform.matrix.tolist(),
+                                "inverse_matrix": np.linalg.inv(transform.matrix).tolist(),
+                                "coordinate_basis": basis,
+                                "motion_threshold_original_px": cfg.calibration.motion_threshold_px,
+                                "motion_threshold_processed_px": motion_threshold,
+                            }
+                            metadata["decoder_transform"] = asdict(
+                                ImageTransform.resize(native_size, actual_size)
+                            )
                         metadata["calibration"] = calibration.model_dump(mode="json")
-                        metadata["original_image_size"] = source.original_image_size
+                        metadata["original_image_size"] = native_size
                         metadata["processed_image_size"] = actual_size
                         (run_dir / "run.json").write_text(
                             json.dumps(metadata, indent=2), encoding="utf-8"
@@ -205,10 +235,16 @@ class Pipeline:
                         if cfg.calibration.detect_camera_motion:
                             guard = CameraMotionGuard(
                                 reference if reference is not None else packet.image,
-                                cfg.calibration.motion_threshold_px,
+                                motion_threshold,
                             )
                     if (packet.image.shape[1], packet.image.shape[0]) != calibration.image_size:
-                        calibration.valid = False
+                        invalidate_calibration("processed_resolution_changed", packet)
+                    elif (
+                        not image_mode
+                        and packet.original_image_size
+                        and packet.original_image_size != native_size
+                    ):
+                        invalidate_calibration("decoded_resolution_changed", packet)
                     if packet.discontinuity:
                         trajectories.histories.clear()
                         detector.reset()
@@ -247,7 +283,7 @@ class Pipeline:
                             for instance in instances:
                                 exclusion |= instance.mask
                             if guard.update(packet.image, exclusion):
-                                calibration.valid = False
+                                invalidate_calibration("camera_motion", packet)
                             last_motion_check = packet.timestamp_s
                         observations = []
                         if calibration.valid:
@@ -324,9 +360,11 @@ class Pipeline:
                                 {
                                     "camera_id": calibration.camera_id,
                                     "clip_id": clip_id,
+                                    "frame_index": packet.frame_index,
                                     "timestamp_s": packet.timestamp_s,
                                     "coordinate_mode": cfg.events.coordinate_mode,
                                     "coordinate_units": calibration.units,
+                                    "calibration_valid": calibration.valid,
                                     "motions": motion_rows,
                                     "pairs": [asdict(pair) for pair in pairs],
                                     "state": decision.state,
@@ -377,6 +415,8 @@ class Pipeline:
                                     "detections": len(instances),
                                     "tracks": len(tracks),
                                     "coordinate_mode": cfg.events.coordinate_mode,
+                                    "calibration_valid": calibration.valid,
+                                    "calibration_invalidations": list(invalidations),
                                 }
                             )
                     processed += 1
@@ -387,6 +427,8 @@ class Pipeline:
                                 "duration_s": source.duration_s,
                                 "processed_frames": processed,
                                 "run_id": run_id,
+                                "calibration_valid": calibration.valid,
+                                "calibration_invalidations": list(invalidations),
                             }
                         )
                     duration = time.perf_counter() - frame_started
@@ -403,6 +445,32 @@ class Pipeline:
             storage.close()
             elapsed = time.perf_counter() - started
             cpu_end = process.cpu_times()
+            completed = exhausted and not failure and decoded > 0
+            evaluable = (
+                completed
+                and calibration is not None
+                and calibration.valid
+                and (image_mode or calibration.metric_valid(cfg.calibration.min_confidence))
+            )
+            non_evaluable_reasons = [item["reason"] for item in invalidations]
+            if not completed:
+                non_evaluable_reasons.append(
+                    "analysis_error"
+                    if failure
+                    else "analysis_stopped"
+                    if stopped
+                    else "no_decodable_frames"
+                )
+            if not image_mode and not evaluable and not non_evaluable_reasons:
+                non_evaluable_reasons.append("calibration_not_metric_or_invalid")
+            metadata["calibration"] = calibration.model_dump(mode="json") if calibration else None
+            metadata["calibration_invalidations"] = invalidations
+            metadata["evaluable"] = evaluable
+            metadata["evaluation_status"] = "evaluable" if evaluable else "not_evaluable"
+            metadata["non_evaluable_reasons"] = non_evaluable_reasons
+            (run_dir / "run.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            if calibration_input and calibration and "calibration_transform" in metadata:
+                calibration_input.write_effective(run_dir, calibration)
             self.summary = {
                 "run_id": run_id,
                 "run_dir": str(run_dir),
@@ -417,7 +485,9 @@ class Pipeline:
                 "cpu_seconds": cpu_end.user + cpu_end.system - cpu_start.user - cpu_start.system,
                 "timestamp_fallbacks": source.timestamp_fallbacks,
                 "calibration_valid": calibration.valid if calibration else False,
-                "metric_calibration_available": calibration.metric_valid()
+                "metric_calibration_available": calibration.metric_valid(
+                    cfg.calibration.min_confidence
+                )
                 if calibration
                 else False,
                 "coordinate_mode": cfg.events.coordinate_mode,
@@ -429,7 +499,11 @@ class Pipeline:
                 "state_counts": state_counts,
                 "error": failure,
                 "stopped": stopped,
-                "completed": exhausted and not failure and decoded > 0,
+                "completed": completed,
+                "evaluable": evaluable,
+                "evaluation_status": "evaluable" if evaluable else "not_evaluable",
+                "non_evaluable_reasons": non_evaluable_reasons,
+                "calibration_invalidations": invalidations,
                 "timings": profiler.summary(),
                 "synthetic": metadata["synthetic"],
             }

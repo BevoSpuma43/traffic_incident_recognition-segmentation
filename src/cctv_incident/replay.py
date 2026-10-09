@@ -9,6 +9,7 @@ import av
 import cv2
 import numpy as np
 
+from .calibration.repository import file_sha256
 from .config import AppConfig
 from .preview import PreviewWriter
 from .storage import EventStorage
@@ -129,6 +130,8 @@ def _render(image, rows, histories, feature, calibration, markers, timestamp):
     label = (
         f"{timestamp:.2f}s | {feature.get('state', 'NORMAL')} | score {feature.get('score', 0):.2f}"
     )
+    if feature.get("run_evaluable") is False:
+        label = "NON VALUTABILE | " + label
     cv2.putText(canvas, label, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
     return draw_impact_markers(canvas, markers, timestamp)
 
@@ -149,6 +152,7 @@ def list_saved_runs(output_dir):
                     "run_dir": str(metrics_path.parent),
                     "source_name": Path(metadata["config"]["video"]["source"]).name,
                     "events": summary["events"],
+                    "evaluable": summary.get("evaluable", summary.get("completed", True)),
                     "modified_at": metrics_path.stat().st_mtime,
                 }
             )
@@ -172,6 +176,15 @@ def export_replay(run_dir):
         source_path = cfg.project.root_dir / source_path
     if not source_path.is_file():
         raise FileNotFoundError(f"Video originale non disponibile: {source_path}")
+    provenance = metadata.get("calibration_provenance") or {}
+    video_identity = provenance.get("video") or {}
+
+    def verify_source():
+        if video_identity.get("sha256") and file_sha256(source_path) != video_identity["sha256"]:
+            raise ValueError("Video originale cambiato rispetto alla calibrazione dell'analisi.")
+
+    verify_source()
+    evaluable = metrics.get("evaluable", metrics.get("completed", True))
     expected_size = metadata.get("processed_image_size")
     with av.open(str(source_path)) as container:
         stream = container.streams.video[0]
@@ -221,7 +234,7 @@ def export_replay(run_dir):
                 packet.image,
                 visible,
                 histories,
-                feature,
+                {**feature, "run_evaluable": evaluable},
                 metadata.get("calibration") or {},
                 markers,
                 timestamp,
@@ -232,6 +245,7 @@ def export_replay(run_dir):
         writer.close()
         if frames != metrics["decoded_frames"]:
             raise ValueError("Il video originale non contiene tutti i frame dell'analisi.")
+        verify_source()
         temporary.replace(target)
     except BaseException:
         writer.close()
@@ -249,6 +263,9 @@ def export_replay(run_dir):
         "frames": frames,
         "last_timestamp_s": last_timestamp,
         "impacts": markers,
+        "evaluable": evaluable,
+        "non_evaluable_reasons": metrics.get("non_evaluable_reasons", []),
+        "calibration_invalidations": metrics.get("calibration_invalidations", []),
         "position_method": "Estimated from involved vehicle bounding boxes at impact time",
         "overlays": [
             "bounding_boxes",

@@ -129,7 +129,13 @@ def estimate_calibration(
 
 
 def load_calibration(path):
-    return Calibration.model_validate(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "schema_version" in data:
+        from .records import to_runtime_calibration
+        from .repository import load_record
+
+        return to_runtime_calibration(load_record(path))
+    return Calibration.model_validate(data)
 
 
 def image_reference(camera_id, image_size):

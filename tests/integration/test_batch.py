@@ -51,6 +51,7 @@ def fake_summary(cfg, stopped=False):
 
 def test_stop_resume_commits_only_complete_videos_and_recovers_csv(batch_inputs):
     job = prepare_job(*batch_inputs)
+    saved_configuration = (job / "batch_config.json").read_bytes()
     calls = []
 
     class FakePipeline:
@@ -82,12 +83,18 @@ def test_stop_resume_commits_only_complete_videos_and_recovers_csv(batch_inputs)
         assert len(list(csv.DictReader(handle))) == 2
     run_job(job, FakePipeline, lambda cfg: object())
     assert len(calls) == 3  # Completed work is never rerun or double counted.
+    assert (job / "batch_config.json").read_bytes() == saved_configuration
 
 
 def test_models_and_settings_have_independent_jobs_and_changed_inputs_are_rejected(batch_inputs):
     config, folder, metadata = batch_inputs
     first = prepare_job(config, folder, metadata)
-    assert prepare_job(config, folder, metadata) == first
+    repeated = prepare_job(config, folder, metadata)
+    assert repeated != first
+    assert (
+        read_json(repeated / "manifest.json")["protocol_sha256"]
+        == read_json(first / "manifest.json")["protocol_sha256"]
+    )
     config.perception.model = folder / "other-seg.pt"
     config.perception.model.write_bytes(b"model")
     second = prepare_job(config, folder, metadata)
@@ -99,6 +106,42 @@ def test_models_and_settings_have_independent_jobs_and_changed_inputs_are_reject
         run_job(first, segmenter_factory=lambda cfg: object())
     assert snapshot(first)["status"] == "error"
     assert not completed_results(first)
+
+
+def test_batch_saves_gui_settings_original_yaml_and_effective_parameters(batch_inputs):
+    import yaml
+
+    config, folder, metadata = batch_inputs
+    original = folder.parent / "custom.yaml"
+    original.write_text("# Original settings\nvideo:\n  target_fps: 8\n", encoding="utf-8")
+    config.video.target_fps = 15
+    job = prepare_job(
+        config,
+        folder,
+        metadata,
+        mode="standard_dataset analisi in batch - no omografia",
+        config_path=original,
+        dataset_directory=folder.parent,
+        dataset_selection="subset",
+    )
+    settings = read_json(job / "batch_config.json")
+    assert settings["mode"] == "standard_dataset analisi in batch - no omografia"
+    assert settings["configuration_yaml"] == str(original.resolve())
+    assert settings["yolo_model"] == str(config.perception.model.resolve())
+    assert settings["dataset_directory"] == str(folder.parent.resolve())
+    assert settings["dataset_selection"] == "subset"
+    assert settings["video_directory"] == str(folder.resolve())
+    assert settings["labels_csv"] == str(metadata.resolve())
+    assert settings["analysis_fps"] == 15
+    assert (job / "source_config.yaml").read_text(encoding="utf-8") == original.read_text(
+        encoding="utf-8"
+    )
+    resolved = yaml.safe_load((job / "resolved_config.yaml").read_text(encoding="utf-8"))
+    assert resolved["video"]["target_fps"] == 15
+    assert resolved["project"]["output_dir"] == str(job / "pipeline")
+    assert resolved == read_json(job / "manifest.json")["config"]
+    original.write_text("video:\n  target_fps: 30\n", encoding="utf-8")
+    assert "target_fps: 8" in (job / "source_config.yaml").read_text(encoding="utf-8")
 
 
 def test_unknown_subset_video_is_not_silently_a_negative(batch_inputs):

@@ -14,6 +14,7 @@ class VideoFrame:
     timestamp_s: float
     frame_index: int
     discontinuity: bool = False
+    original_image_size: tuple[int, int] | None = None
 
 
 class VideoSource:
@@ -46,7 +47,6 @@ class VideoSource:
                 ) as container:
                     self.container = container
                     stream = container.streams.video[0]
-                    self.original_image_size = (stream.width, stream.height)
                     if not self.live and stream.duration is not None:
                         self.duration_s = float(stream.duration * stream.time_base)
                     offset = None
@@ -74,6 +74,9 @@ class VideoSource:
                         if timestamp <= last:
                             continue
                         pixels = frame.to_ndarray(format="bgr24")
+                        native_size = (pixels.shape[1], pixels.shape[0])
+                        if self.original_image_size is None:
+                            self.original_image_size = native_size
                         if self.config.max_width and pixels.shape[1] > self.config.max_width:
                             factor = self.config.max_width / pixels.shape[1]
                             pixels = cv2.resize(
@@ -86,6 +89,7 @@ class VideoSource:
                             timestamp,
                             index,
                             first_after_reconnect,
+                            native_size,
                         )
                         last_arrival = time.monotonic()
                         first_after_reconnect = False

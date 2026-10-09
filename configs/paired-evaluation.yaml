@@ -1,0 +1,28 @@
+# Shared settings for a paired workflow comparison. Confirm video records first.
+# Use this same YAML in BOTH batch modes; the selected GUI mode overrides coordinate_mode.
+# Use records with full-frame ROI (roi_px: null) because image mode uses the full frame.
+project:
+  root_dir: ..
+  output_dir: outputs
+  seed: 42
+video:
+  source: dataset/standard_dataset
+  target_fps: 8
+  max_width: 1280
+  queue_size: 2
+perception:
+  model: models/yolo26s-seg.pt
+  backend: pytorch
+  device: cpu
+  confidence: 0.1
+  image_size: 640
+  classes: [car, truck, bus, motorcycle]
+calibration:
+  detect_camera_motion: true
+events:
+  coordinate_mode: image
+  pre_event_s: 3
+  post_event_s: 5
+ui:
+  render_masks: true
+  render_bird_eye: false
