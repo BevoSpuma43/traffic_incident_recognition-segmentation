@@ -1,5 +1,9 @@
 # Fase 5 — Preparazione persistente delle calibrazioni
 
+Questa pagina descrive la fase originale. Per il flusso corrente con accettazione
+automatica sperimentale, riepilogo e correzioni manuali, vedere
+[batch con ipotesi USA](batch-calibrazione-automatica-usa.md).
+
 Implementata il **7 ottobre 2026**. Suite completa: **248 test superati in
 41,33 s**, senza test saltati, errori o fallimenti, nella `.venv` esistente.
 La preparazione è disponibile; l'inferenza batch metrica è stata aggiunta nella

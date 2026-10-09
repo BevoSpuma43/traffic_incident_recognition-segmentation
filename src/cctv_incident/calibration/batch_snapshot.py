@@ -113,6 +113,7 @@ def csv_provenance(result):
         "calibration_sha256": data.get("sha256"),
         "calibration_record_id": data.get("record_id"),
         "calibration_revision": data.get("revision"),
+        "automatic_acceptance": data.get("automatic_acceptance"),
         "width_origin": (data.get("width") or {}).get("origin"),
         "length_origin": (data.get("length") or {}).get("origin"),
         "explicit_scale_origin": (data.get("explicit_scale") or {}).get("origin"),

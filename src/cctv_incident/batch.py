@@ -136,14 +136,36 @@ def prepare_job(
     dataset_directory=None,
     dataset_selection=None,
     calibration_map=None,
+    selection_path=None,
 ):
     folder, metadata = Path(folder).resolve(), Path(metadata).resolve()
     if not folder.is_dir():
         raise ValueError(f"Cartella video inesistente: {folder}")
+    selection = None
+    selected_names = list_dataset_videos(folder)
+    cfg = config.model_copy(deep=True)
+    if selection_path is not None:
+        from .batch_selection import load_selection, selection_provenance
+
+        sample = load_selection(
+            selection_path,
+            verify_sources=True,
+            verify_calibrations=cfg.events.coordinate_mode == "metric",
+        )
+        if Path(sample["folder"]).resolve() != folder:
+            raise ValueError("La cartella deve coincidere con il campione condiviso")
+        selected_names = [v["relative_path"] for v in sample["videos"]]
+        selection = selection_provenance(selection_path, sample)
+        if cfg.events.coordinate_mode == "metric":
+            cfg.calibration.min_confidence = sample["min_quality"]
+            calibration_map = {
+                v["relative_path"]: Path(selection_path).parent / v["calibration"]["path"]
+                for v in sample["videos"]
+            }
     labels = load_labels(metadata)
     videos = []
     seen = set()
-    for relative in list_dataset_videos(folder):
+    for relative in selected_names:
         path = folder / relative
         if path.name in seen:
             raise ValueError(f"Nome video duplicato nella cartella: {path.name}")
@@ -159,7 +181,6 @@ def prepare_job(
         )
     if not videos:
         raise ValueError("La cartella non contiene video supportati.")
-    cfg = config.model_copy(deep=True)
     if mode is None:
         mode = "standard_dataset analisi in batch - " + (
             "con omografia" if cfg.events.coordinate_mode == "metric" else "no omografia"
@@ -183,6 +204,7 @@ def prepare_job(
         "config": cfg.model_dump(mode="json"),
         "tolerance_s": tolerance_s,
         "videos": videos,
+        "video_selection": selection,
     }
     # Validate tolerance even before the first inference.
     compare_video(videos[0]["label"], [], tolerance_s)
@@ -219,6 +241,7 @@ def prepare_job(
                 if dataset_directory
                 else None,
                 "dataset_selection": dataset_selection,
+                "video_selection": selection,
                 "video_directory": str(folder),
                 "labels_csv": str(metadata),
                 "analysis_fps": cfg.video.target_fps,
@@ -268,6 +291,7 @@ def list_jobs(root):
                 "folder": manifest["folder"],
                 "created_at": manifest["created_at"],
                 "total_videos": len(manifest["videos"]),
+                "selection_id": (manifest.get("video_selection") or {}).get("selection_id"),
             }
         )
     return sorted(jobs, key=lambda row: row["created_at"], reverse=True)
@@ -376,6 +400,7 @@ def export_results(job, output_dir=None):
         "model": manifest["model_name"],
         "model_sha256": manifest["model_sha256"],
         "coordinate_mode": manifest.get("coordinate_mode"),
+        "selection_id": (manifest.get("video_selection") or {}).get("selection_id"),
     }
     video_rows, event_rows = [], []
     for result in results:
@@ -465,6 +490,17 @@ def validate_manifest(manifest, job=None):
     if version not in (1, 2):
         raise ValueError("Versione manifest batch non supportata")
     config = AppConfig.model_validate(manifest["config"])
+    selection = manifest.get("video_selection")
+    if selection:
+        actual = [
+            {"relative_path": v["relative_path"], "sha256": v.get("sha256")}
+            for v in manifest["videos"]
+        ]
+        if (
+            actual != selection["videos"]
+            or Path(manifest["folder"]).resolve() != Path(selection["folder"]).resolve()
+        ):
+            raise ValueError("L'elenco del batch non coincide con il campione condiviso")
     if version >= 2 and manifest.get("coordinate_mode") != config.events.coordinate_mode:
         raise ValueError("Modalità del manifest incoerente con la configurazione")
     if config.events.coordinate_mode == "metric" and version < 2:

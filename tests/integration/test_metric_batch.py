@@ -338,6 +338,8 @@ def test_legacy_exports_leave_missing_provenance_empty(metric_inputs):
 def test_metric_ui_separates_modes_and_preserves_preparation(metric_inputs, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
+    from cctv_incident.calibration import preparation as prep
+
     cfg, folder, metadata, mapping = metric_inputs
     models = cfg.project.root_dir / "models"
     models.mkdir()
@@ -348,6 +350,8 @@ def test_metric_ui_separates_modes_and_preserves_preparation(metric_inputs, monk
     image_cfg.events.coordinate_mode = "image"
     image_job = batch.prepare_job(image_cfg, folder, metadata)
     monkeypatch.setattr("cctv_incident.config.load_config", lambda _: cfg.model_copy(deep=True))
+    started = []
+    monkeypatch.setattr("cctv_incident.batch_ui.start_job", lambda job: started.append(str(job)))
     app = AppTest.from_file(str(Path("apps/streamlit_app.py").resolve())).run(timeout=20)
     next(x for x in app.selectbox if x.label == "Modalita").select(
         "standard_dataset analisi in batch - con omografia"
@@ -356,9 +360,20 @@ def test_metric_ui_separates_modes_and_preserves_preparation(metric_inputs, monk
     assert not any(x.label == "Prepara batch" for x in app.button)
     app.radio(key="metric_batch_stage").set_value("Analisi batch").run(timeout=20)
     assert not any(x.label == "Esperimento salvato per questo modello" for x in app.selectbox)
-    next(x for x in app.button if x.label == "Prepara batch").click().run(timeout=20)
+    launch = next(x for x in app.button if x.label == "Avvia analisi con queste calibrazioni")
+    assert launch.disabled and not started
+    preparation = prep.prepare_session(cfg.project.root_dir, folder, automatic_parameters={})
+    prep.run_preparation(preparation)
+    app.session_state["metric_preparation_job"] = str(preparation)
+    app.run(timeout=20)
+    assert not app.exception and not started
+    assert len(app.dataframe[0].value) == 2
+    next(x for x in app.button if x.label == "Avvia analisi con queste calibrazioni").click().run(
+        timeout=20
+    )
     assert not app.exception
     metric_job = app.session_state["metric_batch_selected_job"]
+    assert started == [metric_job]
     assert metric_job != str(image_job)
     assert batch.read_json(Path(metric_job) / "manifest.json")["coordinate_mode"] == "metric"
     selected = app.selectbox(key="metric_batch_selected_job")

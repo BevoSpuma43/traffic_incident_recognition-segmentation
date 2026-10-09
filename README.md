@@ -70,14 +70,19 @@ esistente, senza blocchi Windows. Restano controllo visivo nel browser e
 verifica dell'accuratezza fisica su misure reali:
 [implementazione, artefatti e collaudo](docs/fase-4-pipeline.md).
 
-La voce **standard_dataset analisi in batch - con omografia** ora permette
-la **preparazione delle calibrazioni**: sessioni persistenti, proposte in un
-worker separato con stop/ripresa, tabella degli stati ed editor condiviso.
-Le conferme restano individuali. Dopo la revisione, **Analisi batch** permette
-di creare esperimenti metrici con copie verificate delle calibrazioni, stop/ripresa
+La voce **standard_dataset analisi in batch - con omografia** ora esegue una
+**calibrazione preliminare automatica sperimentale**, con riferimenti USA ipotizzati
+e ricerca nei primi 10 secondi. Il riepilogo separa accettazione automatica,
+conferma manuale e video da correggere nell'editor; un fallimento non interrompe
+la preparazione degli altri video. L'analisi parte soltanto dal pulsante dedicato,
+dopo aver completato le calibrazioni oppure selezionato **solo i video calibrati
+automaticamente**. Questo campione salvato viene usato anche dal batch di sola
+segmentazione, così i due metodi analizzano esattamente gli stessi video.
+Gli esperimenti mantengono copie verificate, stop/ripresa
 e risultati separati per modalità e modello. Se la geometria diventa invalida,
 il video non viene conteggiato e occorre un nuovo esperimento.
-Guide: [preparazione](docs/fase-5-preparazione.md) e
+Guida corrente: [batch automatico con ipotesi USA](docs/batch-calibrazione-automatica-usa.md).
+Documentazione delle fasi precedenti: [preparazione](docs/fase-5-preparazione.md) e
 [batch metrico e snapshot](docs/fase-6-batch-metrico.md).
 
 La fase 7 aggiunge consultazione degli esperimenti storici anche senza pesi,

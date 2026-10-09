@@ -11,6 +11,10 @@ from .calibration.vehicle_geometry import VehicleDimensions
 from .calibration.vehicle_search import generate_vehicle_proposals
 
 REFERENCE_LABELS = {
+    "us_crosswalk": "Attraversamento · ipotesi USA",
+    "us_dash_group": "Tratti consecutivi · ipotesi USA",
+    "us_single_dash": "Singolo tratto · ipotesi USA ambigua",
+    "us_lane_and_dash": "Corsia e tratto · ipotesi USA",
     "painted_bar": "Barra dipinta",
     "outlined_rectangle": "Rettangolo delimitato",
     "reconstructed_bar": "Barra ricostruita",

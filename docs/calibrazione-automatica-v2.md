@@ -81,12 +81,17 @@ da specificare e confermare. I preset di un singolo tratto sono bloccati sui
 gruppi e sulle barre ricostruite. Un gruppo non riceve la misura di una singola
 barra. I preset preesistenti rimangono disponibili sulle barre complete.
 
-L'API legacy, lo script di calibrazione e la preparazione batch ricevono i nuovi
+L'API legacy, lo script di calibrazione e la preparazione batch originale ricevono i nuovi
 metodi geometrici tramite `generate_proposals`. La ricerca temporale è una scelta
 esplicita nell'editor condiviso: non viene attivata silenziosamente nei worker
 batch o nel campionamento scientifico dei primi frame. Il formato dei record
 resta compatibile. Applicare una proposta archiviata conserva la versione
 dell'algoritmo che l'ha generata.
+
+Aggiornamento: le nuove sessioni del batch metrico attivano ora la ricerca
+preliminare su 10 secondi e l'accettazione sperimentale delle ipotesi USA.
+Il generatore geometrico descritto qui continua a non assegnare misure da solo;
+la nuova orchestrazione è descritta in [batch automatico USA](batch-calibrazione-automatica-usa.md).
 
 ## Verifica e limiti osservati
 

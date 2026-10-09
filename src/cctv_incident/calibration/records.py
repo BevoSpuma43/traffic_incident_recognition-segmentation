@@ -110,6 +110,7 @@ class CalibrationRecord(RecordModel):
     destination_points: tuple[tuple[Finite, Finite], ...] = ()
     explicit_scale: ExplicitScale | None = None
     automation: Automation = Field(default_factory=Automation)
+    automatic_acceptance: Literal["experimental_usa_v1"] | None = None
     geometric_quality: Finite = Field(0, ge=0, le=1)
     runtime: Calibration | None = None
 
@@ -132,6 +133,22 @@ class CalibrationRecord(RecordModel):
             raise ValueError("Draft or invalid records cannot contain a runtime calibration")
         if self.status == "invalid" and not self.invalid_reasons:
             raise ValueError("Invalid records require a reason")
+        if self.automatic_acceptance:
+            selected = self.automation.diagnostics.get("selected_candidate", {})
+            if (
+                self.geometry_mode != "rectangle"
+                or self.automation.method != "auto_assisted"
+                or not self.automation.algorithm_version
+                or selected.get("points_px") != self.points_px
+                or any(
+                    selected.get(name) != getattr(self, name).model_dump(mode="json")
+                    or getattr(self, name).origin != "experimental"
+                    for name in ("width", "length")
+                )
+            ):
+                raise ValueError(
+                    "Automatic acceptance requires the unchanged experimental proposal"
+                )
         if self.status == "confirmed":
             if self.runtime is None or self.invalid_reasons:
                 raise ValueError(
@@ -195,7 +212,7 @@ def _build_runtime(record):
         for distance in (record.width, record.length):
             if (
                 distance.value is None
-                or not distance.user_confirmed
+                or not (distance.user_confirmed or record.automatic_acceptance)
                 or distance.origin == "unknown"
             ):
                 raise ValueError("Both metric distances require values and confirmed provenance")
@@ -227,12 +244,28 @@ def confirm_record(record):
     record = CalibrationRecord.model_validate(record.model_dump())
     if record.status == "invalid":
         raise ValueError("An invalid calibration must be corrected before confirmation")
+    # A manual confirmation must never inherit acceptance from the automatic policy.
+    if record.automatic_acceptance:
+        record = edit_record(record)
     data = record.model_dump()
     data.update(
         status="confirmed",
         invalid_reasons=(),
         runtime=_build_runtime(record).model_dump(),
         modified_at=utc_now(),
+    )
+    return CalibrationRecord.model_validate(data)
+
+
+def accept_automatic_record(record):
+    """Accept an approximate US hypothesis without claiming user confirmation."""
+    if record.status != "draft":
+        raise ValueError("Automatic acceptance requires a draft")
+    data = record.model_dump()
+    data["automatic_acceptance"] = "experimental_usa_v1"
+    candidate = CalibrationRecord.model_validate(data)
+    data.update(
+        status="confirmed", runtime=_build_runtime(candidate).model_dump(), modified_at=utc_now()
     )
     return CalibrationRecord.model_validate(data)
 
@@ -258,13 +291,26 @@ def edit_record(record, **changes):
     ):
         changes["geometric_quality"] = 0
     data = record.model_dump()
-    data.update(changes, status="draft", runtime=None, invalid_reasons=(), modified_at=utc_now())
+    data.update(
+        changes,
+        status="draft",
+        runtime=None,
+        automatic_acceptance=None,
+        invalid_reasons=(),
+        modified_at=utc_now(),
+    )
     return CalibrationRecord.model_validate(data)
 
 
 def invalidate_record(record, reason):
     data = record.model_dump()
-    data.update(status="invalid", runtime=None, invalid_reasons=(reason,), modified_at=utc_now())
+    data.update(
+        status="invalid",
+        runtime=None,
+        automatic_acceptance=None,
+        invalid_reasons=(reason,),
+        modified_at=utc_now(),
+    )
     return CalibrationRecord.model_validate(data)
 
 

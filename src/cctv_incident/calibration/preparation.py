@@ -24,6 +24,7 @@ from ..batch import (
     write_json,
 )
 from ..video_inputs import list_dataset_videos
+from .automatic import AutomaticParameters, generate_automatic_proposals
 from .proposals import (
     ALGORITHM_VERSION,
     ProposalCandidate,
@@ -32,7 +33,7 @@ from .proposals import (
     candidate_changes,
     generate_proposals,
 )
-from .records import Automation, VideoIdentity, edit_record
+from .records import Automation, VideoIdentity, accept_automatic_record, edit_record
 from .repository import (
     _atomic_bytes,
     compatibility_reasons,
@@ -56,7 +57,15 @@ def _parameters_hash(parameters):
     return hashlib.sha256(json.dumps(parameters, sort_keys=True).encode()).hexdigest()
 
 
-def prepare_session(project_root, folder, *, output_root=None, parameters=None):
+def prepare_session(
+    project_root,
+    folder,
+    *,
+    output_root=None,
+    parameters=None,
+    automatic_parameters=None,
+    model_path=None,
+):
     project_root, folder = Path(project_root).resolve(), Path(folder).resolve()
     if not folder.is_dir():
         raise ValueError("Cartella video inesistente")
@@ -86,6 +95,14 @@ def prepare_session(project_root, folder, *, output_root=None, parameters=None):
             }
         )
     parameters = ProposalParameters.model_validate(parameters or {}).model_dump()
+    automatic = (
+        AutomaticParameters.model_validate(automatic_parameters).model_dump(mode="json")
+        if automatic_parameters is not None
+        else None
+    )
+    model = Path(model_path).resolve() if model_path else None
+    if model is not None and not model.is_file():
+        raise ValueError("Pesi locali per la calibrazione non disponibili")
     root = Path(output_root or project_root / "outputs/calibration-preparations").resolve()
     job = root / ("preparation-" + uuid4().hex[:16])
     job.mkdir(parents=True)
@@ -102,6 +119,10 @@ def prepare_session(project_root, folder, *, output_root=None, parameters=None):
             "code_sha256": preparation_signature(),
             "parameters": parameters,
             "parameters_sha256": _parameters_hash(parameters),
+            "automatic_parameters": automatic,
+            "automatic_parameters_sha256": _parameters_hash(automatic),
+            "model_path": str(model) if model else None,
+            "model_sha256": sha256(model) if model else None,
             "videos": videos,
         },
     )
@@ -169,16 +190,39 @@ def _verify_result(job, result):
         load_record(path)
 
 
-def validate_session(job):
+def validate_session(job, *, completed_results=False):
     job = Path(job)
     manifest = read_json(job / "manifest.json")
-    if manifest.get("schema_version") != 1 or manifest["code_sha256"] != preparation_signature():
+    if completed_results:
+        state = snapshot(job)
+        if (
+            state["active"]
+            or state["status"] != "completed"
+            or state["completed_videos"] != state["total_videos"]
+        ):
+            raise ValueError("Completa la preparazione prima di usare i risultati")
+    if manifest.get("schema_version") != 1 or (
+        not completed_results and manifest["code_sha256"] != preparation_signature()
+    ):
         raise ValueError("Formato o codice cambiato: crea una nuova sessione di preparazione")
     if (
-        manifest["algorithm_version"] != ALGORITHM_VERSION
-        or _parameters_hash(manifest["parameters"]) != manifest["parameters_sha256"]
-    ):
+        not completed_results and manifest["algorithm_version"] != ALGORITHM_VERSION
+    ) or _parameters_hash(manifest["parameters"]) != manifest["parameters_sha256"]:
         raise ValueError("Parametri della proposta cambiati: crea una nuova sessione")
+    if manifest.get("automatic_parameters") is not None:
+        AutomaticParameters.model_validate(manifest["automatic_parameters"])
+        if (
+            _parameters_hash(manifest["automatic_parameters"])
+            != manifest["automatic_parameters_sha256"]
+        ):
+            raise ValueError("Ipotesi metriche cambiate: crea una nuova sessione")
+        model = manifest.get("model_path")
+        if (
+            not completed_results
+            and model
+            and (not Path(model).is_file() or sha256(model) != manifest["model_sha256"])
+        ):
+            raise ValueError("Pesi della calibrazione modificati: crea una nuova sessione")
     if list_dataset_videos(manifest["folder"]) != [v["relative_path"] for v in manifest["videos"]]:
         raise ValueError("Elenco video cambiato: crea una nuova sessione")
     for video in manifest["videos"]:
@@ -195,11 +239,25 @@ def _write_proposal(item, proposal):
         if not ok:
             raise ValueError("Impossibile salvare la diagnostica della proposta")
         _atomic_bytes(item / name, encoded.tobytes())
+    evidence = {}
+    for digest, pixels in proposal.evidence_images.items():
+        if not (
+            (len(digest) == 64 and all(c in "0123456789abcdef" for c in digest))
+            or (digest.isascii() and digest.isdecimal() and len(digest) <= 16)
+        ):
+            raise ValueError("Identificativo immagine diagnostica non valido")
+        name = f"evidence-{digest}.png"
+        ok, encoded = cv2.imencode(".png", pixels)
+        if not ok:
+            raise ValueError("Impossibile salvare il fotogramma diagnostico")
+        _atomic_bytes(item / name, encoded.tobytes())
+        evidence[digest] = name
     write_json(
         item / "proposal.json",
         {
             "diagnostics": proposal.diagnostics,
             "candidates": [c.model_dump(mode="json") for c in proposal.candidates],
+            "evidence": evidence,
         },
     )
 
@@ -211,6 +269,11 @@ def load_proposal(job, index):
         return None
     result = read_json(item / "result.json")
     _verify_result(job, result)
+    if any(
+        (item / name).relative_to(job).as_posix() not in result.get("artifacts", {})
+        for name in ("proposal.json", "mask.png", "preview.png")
+    ):
+        return None
     data = read_json(item / "proposal.json")
     mask = cv2.imdecode(
         np.frombuffer((item / "mask.png").read_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE
@@ -220,11 +283,24 @@ def load_proposal(job, index):
     )
     if mask is None or preview is None:
         raise ValueError("Diagnostica della proposta illeggibile")
+    evidence = {}
+    for digest, name in data.get("evidence", {}).items():
+        path = (item / name).resolve()
+        if (
+            path.parent != item.resolve()
+            or path.relative_to(job.resolve()).as_posix() not in result["artifacts"]
+        ):
+            raise ValueError("Fotogramma diagnostico non verificato")
+        pixels = cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+        if pixels is None:
+            raise ValueError("Fotogramma diagnostico illeggibile")
+        evidence[digest] = pixels
     return ProposalResult(
         tuple(ProposalCandidate.model_validate(c) for c in data["candidates"]),
         data["diagnostics"],
         mask,
         preview,
+        evidence,
     )
 
 
@@ -264,6 +340,17 @@ def table_rows(job, *, verify_sources=False):
                 if record and record.explicit_scale
                 else None,
                 "revision": record.revision if record else None,
+                "acceptance": ("automatic" if record.automatic_acceptance else "manual")
+                if record and record.status == "confirmed"
+                else None,
+                "reference_type": record.automation.diagnostics.get("selected_candidate", {}).get(
+                    "reference_type"
+                )
+                if record
+                else None,
+                "width_m": record.width.value if record else None,
+                "length_m": record.length.value if record else None,
+                "quality": record.geometric_quality if record else None,
                 "record_path": str(match.path) if match and match.path else None,
                 "preparation": result.get("status", "pending"),
                 "message": error or result.get("message", ""),
@@ -287,8 +374,48 @@ def _record_result(path, status, message=""):
     }
 
 
+def analysis_readiness(job, *, min_quality=0.55, verify_sources=False):
+    """The preparation barrier includes failed attempts, then requires manual repairs."""
+    state = snapshot(job)
+    manifest = read_json(Path(job) / "manifest.json")
+    threshold = (manifest.get("automatic_parameters") or {}).get("min_quality", min_quality)
+    rows = table_rows(job, verify_sources=verify_sources)
+    failed = [r for r in rows if r["state"] != "confirmed" or (r["quality"] or 0) < threshold]
+    finished = (
+        not state["active"]
+        and state["status"] == "completed"
+        and state["completed_videos"] == state["total_videos"]
+    )
+    return {
+        "ready": finished and not failed,
+        "finished": finished,
+        "failed": failed,
+        "rows": rows,
+        "min_quality": threshold,
+    }
+
+
+def prepared_archive_mapping(job, folder, *, min_quality=0.55):
+    from .batch_snapshot import archive_mapping
+
+    manifest = validate_session(job, completed_results=True)
+    if Path(folder).resolve() != Path(manifest["folder"]).resolve():
+        raise ValueError("La cartella deve coincidere con la preparazione selezionata")
+    readiness = analysis_readiness(job, min_quality=min_quality, verify_sources=True)
+    if not readiness["finished"]:
+        raise ValueError("Completa la calibrazione preliminare di tutti i video prima dell'analisi")
+    if readiness["failed"]:
+        raise ValueError(
+            "Calibra manualmente i video non utilizzabili: "
+            + ", ".join(r["video"] for r in readiness["failed"])
+        )
+    return archive_mapping(
+        folder, manifest["project_root"], [v["relative_path"] for v in manifest["videos"]]
+    )
+
+
 def run_preparation(job, *, proposer=None):
-    """At most one worker; commit per video; never confirm or replace existing records."""
+    """Commit per video; preserve confirmations, continue after individual failures."""
     job = Path(job).resolve()
     with exclusive_lock(job.parent / ".execution.lock"):
         state = read_json(job / "checkpoint.json")
@@ -299,6 +426,28 @@ def run_preparation(job, *, proposer=None):
 
         try:
             manifest = validate_session(job)
+            automatic = manifest.get("automatic_parameters")
+
+            # Delay loading YOLO until the first vehicle fallback and reuse it.
+            class LazySegmenter:
+                instance = None
+
+                def predict(self, frame):
+                    if self.instance is None:
+                        from ..config import Perception
+                        from ..segmenter import Segmenter
+
+                        self.instance = Segmenter(
+                            Perception(
+                                model=Path(manifest["model_path"]),
+                                classes=["car", "bus", "truck"],
+                                confidence=0.45,
+                                max_detections=24,
+                            )
+                        )
+                    return self.instance.predict(frame)
+
+            segmenter = LazySegmenter() if manifest.get("model_path") else None
             update(status="running", error=None)
             for index, video in enumerate(manifest["videos"]):
                 item = job / "items" / f"{index:06d}"
@@ -314,11 +463,16 @@ def run_preparation(job, *, proposer=None):
                         raise ValueError(video["inspection_error"])
                     identity = VideoIdentity.model_validate(video["identity"])
                     match = find_record(identity, manifest["archive"])
-                    if match.status == "compatible":
+                    if match.status == "compatible" and (
+                        not automatic
+                        or match.record.status == "confirmed"
+                        or match.record.automation.diagnostics.get("preparation_session")
+                        == manifest["session_id"]
+                    ):
                         result = _record_result(
                             match.path, "kept", "Calibrazione esistente conservata"
                         )
-                    elif match.status != "missing":
+                    elif match.status not in {"missing", "compatible"}:
                         result = {"status": "incompatible", "message": "; ".join(match.reasons)}
                     else:
                         record, image = create_draft(
@@ -327,9 +481,22 @@ def run_preparation(job, *, proposer=None):
                         )
                         if compatibility_reasons(record, identity):
                             raise ValueError("Il video è cambiato durante la lettura")
-                        proposal = (proposer or generate_proposals)(
-                            image, parameters=manifest["parameters"]
-                        )
+                        if match.status == "compatible":
+                            record = match.record
+                        if automatic:
+                            proposal = (proposer or generate_automatic_proposals)(
+                                Path(manifest["folder"]) / video["relative_path"],
+                                image,
+                                roi=record.roi_px,
+                                parameters=manifest["parameters"],
+                                automatic_parameters=automatic,
+                                model_path=manifest.get("model_path"),
+                                segmenter=segmenter,
+                            )
+                        else:
+                            proposal = (proposer or generate_proposals)(
+                                image, parameters=manifest["parameters"]
+                            )
                         proposal.diagnostics["preparation_session"] = manifest["session_id"]
                         if (job / "stop.request").exists():
                             update(status="paused")
@@ -351,13 +518,38 @@ def run_preparation(job, *, proposer=None):
                             "session_id"
                         ]
                         record = edit_record(record, **changes)
+                        if automatic:
+                            rejected = []
+                            for candidate in proposal.candidates:
+                                try:
+                                    if candidate.geometric_quality < automatic["min_quality"]:
+                                        raise ValueError("Qualità geometrica insufficiente")
+                                    accepted = accept_automatic_record(
+                                        edit_record(
+                                            record, **candidate_changes(candidate, proposal)
+                                        )
+                                    )
+                                    record = accepted
+                                    break
+                                except (ValueError, cv2.error) as exc:
+                                    rejected.append(str(exc))
+                            if record.status != "confirmed":
+                                proposal.diagnostics["reason"] = (
+                                    "Calibrazione manuale richiesta. "
+                                    + (
+                                        "; ".join(rejected)
+                                        if rejected
+                                        else proposal.diagnostics["reason"]
+                                    )
+                                )
+                            _write_proposal(item, proposal)
                         _verify_video(manifest, video)
                         try:
                             path = save_record(
                                 record,
                                 manifest["archive"],
                                 reference_image=image,
-                                only_if_missing=True,
+                                only_if_missing=match.status == "missing",
                             )
                         except ValueError:
                             # A manual save may have won the archive lock while proposals ran.
@@ -370,7 +562,13 @@ def run_preparation(job, *, proposer=None):
                         else:
                             result = _record_result(
                                 path,
-                                "proposed" if proposal.candidates else "no_reference",
+                                (
+                                    "auto_calibrated"
+                                    if record.status == "confirmed"
+                                    else "manual_required"
+                                )
+                                if automatic
+                                else ("proposed" if proposal.candidates else "no_reference"),
                                 proposal.diagnostics["reason"],
                             )
                     # Also recovers a crash after archive save but before result publication.
@@ -378,6 +576,7 @@ def run_preparation(job, *, proposer=None):
                         p
                         for p in item.glob("*")
                         if p.name in {"proposal.json", "mask.png", "preview.png"}
+                        or p.name.startswith("evidence-")
                     ]
                     result["artifacts"] = {
                         p.relative_to(job).as_posix(): sha256(p) for p in artifacts

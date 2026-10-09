@@ -55,6 +55,7 @@ class RunCalibration:
                 else None
             ),
             "automation": record.automation.model_dump(mode="json") if record else None,
+            "automatic_acceptance": record.automatic_acceptance if record else None,
             "source_snapshot": "calibration-source.yaml",
             "original_snapshot": "calibration-original.yaml",
             "record_snapshot": "calibration-record.yaml" if record else None,

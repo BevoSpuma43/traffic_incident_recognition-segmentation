@@ -1,5 +1,9 @@
 # Fase 6 — Batch metrico e snapshot
 
+Questa pagina descrive la fase originale. Il nuovo avvio richiede una preparazione
+completa e mostra il riepilogo delle calibrazioni prima dell'analisi:
+[batch automatico con ipotesi USA](batch-calibrazione-automatica-usa.md).
+
 Implementazione del 7 ottobre 2026, nella `.venv` esistente.
 Suite completa: **271 test superati in 89,23 s**, inclusi 23 nuovi casi;
 zero errori, fallimenti o test saltati. Ruff, formato di 128 file e controllo

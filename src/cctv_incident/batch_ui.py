@@ -1,5 +1,6 @@
 """Streamlit controls for durable batch workers; no inference in the UI thread."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -16,8 +17,8 @@ from .batch import (
     stop_job,
     worker_alive,
 )
-from .calibration.batch_snapshot import archive_mapping
-from .video_inputs import list_dataset_videos
+from .batch_selection import active_selection, load_selection
+from .calibration.preparation import analysis_readiness, prepared_archive_mapping
 
 
 def render_batch_page(cfg, *, mode, config_path):
@@ -25,6 +26,19 @@ def render_batch_page(cfg, *, mode, config_path):
     prefix = "metric_" if metric else ""
     selection_key = prefix + "batch_selected_job"
     root = cfg.project.root_dir
+    try:
+        selection_path = active_selection(root)
+        sample = load_selection(selection_path) if selection_path else None
+    except (OSError, ValueError, KeyError) as exc:
+        st.error(f"Campione condiviso non disponibile: {exc}")
+        return
+    preparation_job = st.session_state.get("metric_preparation_job") if metric else None
+    preparation = None
+    if preparation_job:
+        try:
+            preparation = read_json(Path(preparation_job) / "manifest.json")
+        except (ValueError, OSError):
+            preparation_job = None
     output_root = root / "outputs/batches"
     st.subheader("Analisi sequenziale della cartella")
     st.write(
@@ -67,20 +81,82 @@ def render_batch_page(cfg, *, mode, config_path):
     directories = (
         sorted(p.name for p in dataset.iterdir() if p.is_dir()) if dataset.is_dir() else []
     )
-    choices = directories + ["Percorso personalizzato"]
-    selected = st.sidebar.selectbox(
-        "Cartella nel dataset",
-        choices,
-        index=choices.index("standard_dataset")
-        if "standard_dataset" in choices
-        else len(choices) - 1,
-        key=prefix + "batch_dataset",
-    )
-    folder = st.sidebar.text_input(
-        "Cartella video",
-        str(dataset / selected) if selected in directories else str(dataset),
-        key=f"{prefix}batch_folder_{selected}",
-    )
+    if sample:
+        selected, folder = "Campione condiviso", sample["folder"]
+        st.success(
+            f"Campione condiviso: {len(sample['videos'])}/{sample['original_count']} video. "
+            "Sia l'omografia sia la sola segmentazione useranno esattamente questo elenco."
+        )
+        st.sidebar.caption(f"Cartella del campione: {folder}")
+        st.caption(f"Campione: {sample['selection_id']} · {len(sample['excluded'])} video esclusi.")
+        st.dataframe(
+            [{"Video selezionato": v["relative_path"]} for v in sample["videos"]], hide_index=True
+        )
+        st.download_button(
+            "Scarica elenco del campione",
+            json.dumps(
+                {
+                    "campione": sample["selection_id"],
+                    "video": [v["relative_path"] for v in sample["videos"]],
+                },
+                indent=2,
+            ),
+            file_name=sample["selection_id"] + ".json",
+            mime="application/json",
+            key=prefix + "sample_download",
+        )
+    elif metric:
+        selected = "Preparazione calibrazioni"
+        folder = preparation["folder"] if preparation else str(dataset)
+        st.sidebar.caption(
+            f"Cartella della preparazione: {folder}"
+            if preparation
+            else "Seleziona e completa una sessione in Preparazione calibrazioni."
+        )
+    else:
+        choices = directories + ["Percorso personalizzato"]
+        selected = st.sidebar.selectbox(
+            "Cartella nel dataset",
+            choices,
+            index=choices.index("standard_dataset")
+            if "standard_dataset" in choices
+            else len(choices) - 1,
+            key=prefix + "batch_dataset",
+        )
+        folder = st.sidebar.text_input(
+            "Cartella video",
+            str(dataset / selected) if selected in directories else str(dataset),
+            key=f"{prefix}batch_folder_{selected}",
+        )
+    readiness = None
+    if metric and preparation_job and not sample:
+        try:
+            readiness = analysis_readiness(
+                preparation_job, min_quality=cfg.calibration.min_confidence
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            st.error(f"Preparazione non disponibile: {exc}")
+    if readiness:
+        st.write("**Riepilogo calibrazioni prima dell'analisi**")
+        st.dataframe(
+            [
+                {
+                    "Video": r["video"],
+                    "Stato": "Utilizzabile"
+                    if r["state"] == "confirmed" and (r["quality"] or 0) >= readiness["min_quality"]
+                    else "Da correggere",
+                    "Accettazione": "Automatica sperimentale"
+                    if r["acceptance"] == "automatic"
+                    else ("Manuale" if r["acceptance"] else "—"),
+                    "Riferimento": r["reference_type"],
+                    "Larghezza (m)": r["width_m"],
+                    "Lunghezza (m)": r["length_m"],
+                    "Motivo": r["message"],
+                }
+                for r in readiness["rows"]
+            ],
+            hide_index=True,
+        )
     metadata = st.sidebar.text_input(
         "CSV delle etichette", str(dataset / "metadata-real.csv"), key=prefix + "batch_metadata"
     )
@@ -89,7 +165,7 @@ def render_batch_page(cfg, *, mode, config_path):
     )
     st.sidebar.caption("Mantieni gli stessi FPS e parametri per confrontare i modelli.")
     st.caption(
-        "Prepara batch crea sempre un nuovo esperimento in una cartella separata. "
+        "L'avvio crea un nuovo esperimento in una cartella separata. "
         "Per continuare un esperimento esistente, selezionalo sotto e usa Riprendi."
     )
     cfg = cfg.model_copy(deep=True)
@@ -97,18 +173,30 @@ def render_batch_page(cfg, *, mode, config_path):
     cfg.perception.backend = "pytorch"
     cfg.video.target_fps = fps
     if metric:
+        if sample:
+            cfg.calibration.min_confidence = sample["min_quality"]
+        elif readiness:
+            cfg.calibration.min_confidence = readiness["min_quality"]
         st.info(
-            "Ogni video deve avere una calibrazione confermata e compatibile. "
-            "Prepara batch verifica l'intera cartella e salva copie indipendenti; "
-            "se manca una calibrazione, torna a Preparazione calibrazioni."
+            "L'analisi usa le calibrazioni del riepilogo e ne conserva copie indipendenti. "
+            "Seleziona un campione di video calibrati oppure completa tutte le correzioni manuali. "
+            "Le calibrazioni automatiche sperimentali producono misure approssimative."
         )
     if st.button(
-        "Prepara batch", type="primary", key=prefix + "batch_prepare", disabled=not model.is_file()
+        "Avvia analisi con queste calibrazioni" if metric else "Prepara batch",
+        type="primary",
+        key=prefix + "batch_prepare",
+        disabled=not model.is_file()
+        or (metric and not sample and not (readiness and readiness["ready"])),
     ):
         try:
             with st.spinner("Verifica video, etichette e modello..."):
                 calibration_map = (
-                    archive_mapping(folder, root, list_dataset_videos(folder)) if metric else None
+                    prepared_archive_mapping(
+                        preparation_job, folder, min_quality=cfg.calibration.min_confidence
+                    )
+                    if metric and not sample
+                    else None
                 )
                 job = prepare_job(
                     cfg,
@@ -121,9 +209,14 @@ def render_batch_page(cfg, *, mode, config_path):
                     dataset_directory=dataset,
                     dataset_selection=selected,
                     calibration_map=calibration_map,
+                    selection_path=selection_path,
                 )
             st.session_state[selection_key] = str(job)
-            st.success("Nuovo batch pronto: configurazione salvata. Premi Avvia batch.")
+            if metric:
+                start_job(job)
+                st.success("Analisi avviata con le calibrazioni del riepilogo.")
+            else:
+                st.success("Nuovo batch pronto: configurazione salvata. Premi Avvia batch.")
         except (OSError, ValueError, RuntimeError) as exc:
             st.error(str(exc))
 
@@ -133,6 +226,7 @@ def render_batch_page(cfg, *, mode, config_path):
         for item in jobs
         if Path(item["model_path"]) == model
         and item["coordinate_mode"] == cfg.events.coordinate_mode
+        and (not sample or item.get("selection_id") == sample["selection_id"])
     ]
     if matching:
         options = {item["path"]: item for item in matching}
@@ -165,7 +259,7 @@ def render_batch_page(cfg, *, mode, config_path):
             f"Esperimento selezionato: {manifest['folder']} · "
             f"{manifest['config']['video']['target_fps']:g} FPS · "
             f"tolleranza ±{manifest['tolerance_s']:g} s. "
-            "Le impostazioni laterali valgono per Prepara batch; Riprendi usa quelle salvate."
+            "Le impostazioni laterali valgono per i nuovi esperimenti; Riprendi usa quelle salvate."
         )
         if all(v["label"]["positive"] for v in manifest["videos"]):
             st.info(
@@ -287,6 +381,7 @@ def batch_monitor(selected_job, output_root, prefix=""):
                     "Modello": item["model_name"],
                     "Modalità": item["coordinate_mode"] or "Non registrata",
                     "Cartella": item["folder"],
+                    "Campione": item.get("selection_id") or "Cartella completa",
                     "Video completati": report["completed_videos"],
                     "Video totali": report["total_videos"],
                     "Completo": report["complete"],

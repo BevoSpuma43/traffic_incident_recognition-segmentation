@@ -278,6 +278,10 @@ def render_calibration_editor(
         st.warning(session.input_error)
 
     if session.locked:
+        if record.automatic_acceptance:
+            st.info(
+                "Accettazione automatica sperimentale: misure approssimative basate sulle ipotesi USA. Nessuna conferma manuale registrata."
+            )
         st.info("Controlla punti e misure sul fotogramma prima di riutilizzare la calibrazione.")
         if st.button("Modifica calibrazione", key=prefix + "_unlock"):
             session.record = edit_record(record)
@@ -428,7 +432,11 @@ def render_calibration_editor(
             f"Qualità geometrica indicativa: {quality:.2f}. Non misura l'accuratezza fisica delle distanze."
         )
         candidate = record if session.locked else edit_record(record, geometric_quality=quality)
-        confirmed = confirm_record(candidate)
+        confirmed = (
+            candidate
+            if session.locked and candidate.automatic_acceptance
+            else confirm_record(candidate)
+        )
     except (ValueError, cv2.error) as exc:
         st.info(f"Calibrazione da completare o correggere: {_validation_message(exc)}")
 
